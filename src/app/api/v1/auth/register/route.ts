@@ -6,6 +6,7 @@ import { withLogging } from "@/lib/utils/with-logging";
 import { botGuard } from "@/lib/utils/bot-guard";
 import { trackEvent } from "@/lib/utils/track-event";
 import { enrollParticipant } from "@/lib/services/enrollment";
+import { redeemReferral } from "@/lib/services/referral";
 
 export const POST = withLogging("POST /api/v1/auth/register", async (request: NextRequest) => {
   const blocked = await botGuard(request);
@@ -92,6 +93,11 @@ export const POST = withLogging("POST /api/v1/auth/register", async (request: Ne
   // Assign treatment + enroll at signup (idempotent; never throws). The (app)
   // layout re-runs this on first authenticated load as a safety net.
   await enrollParticipant(user.id);
+
+  // Optional: if the user arrived via a referral link, link them to the recruiter.
+  if (body.referral_code && typeof body.referral_code === "string") {
+    await redeemReferral(user.id, body.referral_code);
+  }
 
   return Response.json(
     {
