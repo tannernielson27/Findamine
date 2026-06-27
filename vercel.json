@@ -1,6 +1,7 @@
 {
   "crons": [
-    { "path": "/api/cron/privacy-snapshots", "schedule": "0 8 * * *" }
+    { "path": "/api/cron/privacy-snapshots", "schedule": "0 8 * * *" },
+    { "path": "/api/cron/survey-deliveries", "schedule": "0 9 * * *" }
   ],
   "headers": [
     {

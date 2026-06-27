@@ -17,6 +17,7 @@ import { assignParticipant } from "@/lib/services/randomization";
 import { getDefaults, type VisibilityLevel } from "@/lib/utils/privacy";
 import { trackEvent } from "@/lib/utils/track-event";
 import { recordPrivacyIndexSnapshot } from "@/lib/services/privacy-snapshots";
+import { createDueDeliveriesForUser } from "@/lib/services/survey-delivery";
 
 export type PrivacyDefaultCondition = "private" | "neutral" | "public";
 
@@ -167,7 +168,10 @@ export async function enrollParticipant(userId: string): Promise<EnrollmentResul
       .update({ current_sample_size: count || 0 })
       .eq("id", study.id);
 
-    // 9. Log the enrollment event (t0 of the participant timeline).
+    // 9. Materialize any immediately-due surveys (e.g. T1 baseline at offset 0).
+    await createDueDeliveriesForUser(userId, new Date().toISOString());
+
+    // 10. Log the enrollment event (t0 of the participant timeline).
     await trackEvent({
       userId,
       eventType: "study_enrolled",
