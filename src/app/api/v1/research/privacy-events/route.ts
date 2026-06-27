@@ -9,6 +9,17 @@ export async function POST(request: NextRequest) {
     if (!user) throw new ApiError(401, "Not authenticated");
 
     const body = await request.json();
+
+    const ALLOWED_EVENT_TYPES = [
+      "privacy_change",
+      "privacy_abandon",
+      "privacy_view",
+      "privacy_field_touch",
+    ];
+    if (!ALLOWED_EVENT_TYPES.includes(body.event_type)) {
+      throw new ApiError(400, "Invalid event_type");
+    }
+
     const supabase = await createSupabaseServiceClient();
 
     const { data, error } = await supabase
