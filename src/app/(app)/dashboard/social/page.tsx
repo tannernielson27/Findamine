@@ -18,6 +18,13 @@ interface Kudos {
   receiver: { display_name: string | null } | null;
 }
 
+interface ReferralInfo {
+  code: string | null;
+  minion_count: number;
+  referral_points: number;
+  minions: { users: { display_name: string | null } | null }[];
+}
+
 export default function SocialPage() {
   const [friends, setFriends] = useState<Friend[]>([]);
   const [kudos, setKudos] = useState<Kudos[]>([]);
@@ -25,12 +32,17 @@ export default function SocialPage() {
   const [kudosMessage, setKudosMessage] = useState("");
   const [kudosReceiverId, setKudosReceiverId] = useState("");
   const [sending, setSending] = useState(false);
+  const [referral, setReferral] = useState<ReferralInfo | null>(null);
+  const [redeemCode, setRedeemCode] = useState("");
+  const [redeemMsg, setRedeemMsg] = useState("");
+  const [copied, setCopied] = useState(false);
 
   useEffect(() => {
     async function load() {
-      const [friendsRes, kudosRes] = await Promise.all([
+      const [friendsRes, kudosRes, referralRes] = await Promise.all([
         fetch("/api/v1/social/friends"),
         fetch("/api/v1/social/kudos"),
+        fetch("/api/v1/social/referrals"),
       ]);
       if (friendsRes.ok) {
         const data = await friendsRes.json();
@@ -40,10 +52,40 @@ export default function SocialPage() {
         const data = await kudosRes.json();
         setKudos(data.kudos || []);
       }
+      if (referralRes.ok) {
+        setReferral(await referralRes.json());
+      }
       setLoading(false);
     }
     load();
   }, []);
+
+  const handleRedeem = async () => {
+    if (!redeemCode.trim()) return;
+    setRedeemMsg("");
+    const res = await fetch("/api/v1/social/referrals", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ code: redeemCode.trim() }),
+    });
+    if (res.ok) {
+      setRedeemMsg("You're now connected to your recruiter!");
+      setRedeemCode("");
+    } else {
+      const err = await res.json().catch(() => ({}));
+      setRedeemMsg(err.error === "self_referral" ? "You can't use your own code." :
+        err.error === "already_recruited" ? "You already have a recruiter." :
+        "That code didn't work.");
+    }
+  };
+
+  const handleCopyCode = () => {
+    if (!referral?.code) return;
+    navigator.clipboard?.writeText(referral.code).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    }).catch(() => {});
+  };
 
   const handleSendKudos = async () => {
     if (!kudosMessage.trim() || !kudosReceiverId || sending) return;
@@ -78,6 +120,57 @@ export default function SocialPage() {
           <div className="h-48 bg-gray-100 rounded-lg" />
         </div>
       ) : (
+        <>
+        {/* Referral economy — recruit minions, earn when they score */}
+        <div className="rounded-lg border border-amber-200 bg-gradient-to-br from-amber-50 to-white p-4 mb-6">
+          <div className="flex items-start justify-between gap-4 flex-wrap">
+            <div>
+              <h2 className="font-semibold text-sm text-gray-900 mb-1">Recruit & Earn</h2>
+              <p className="text-xs text-gray-500 mb-3 max-w-md">
+                Share your code. When someone joins with it, they become your minion —
+                and you earn points every time they score.
+              </p>
+              {referral?.code && (
+                <button
+                  onClick={handleCopyCode}
+                  className="inline-flex items-center gap-2 rounded-md border border-amber-300 bg-white px-3 py-1.5 text-sm font-mono font-semibold text-amber-700 hover:bg-amber-50"
+                >
+                  {referral.code}
+                  <span className="text-[10px] font-sans text-amber-500">{copied ? "copied!" : "tap to copy"}</span>
+                </button>
+              )}
+            </div>
+            <div className="flex gap-4">
+              <div className="text-center">
+                <div className="text-xl font-bold text-amber-600">{referral?.minion_count ?? 0}</div>
+                <div className="text-[10px] text-gray-500">Minions</div>
+              </div>
+              <div className="text-center">
+                <div className="text-xl font-bold text-emerald-600">{referral?.referral_points ?? 0}</div>
+                <div className="text-[10px] text-gray-500">Points earned</div>
+              </div>
+            </div>
+          </div>
+
+          {/* Redeem someone else's code (only if not already recruited) */}
+          <div className="mt-3 pt-3 border-t border-amber-100 flex gap-2 items-center flex-wrap">
+            <input
+              value={redeemCode}
+              onChange={(e) => setRedeemCode(e.target.value.toUpperCase().slice(0, 8))}
+              placeholder="Got a code? Enter it"
+              className="rounded-md border border-gray-300 px-3 py-1.5 text-sm font-mono w-44 focus:border-amber-500 focus:outline-none focus:ring-1 focus:ring-amber-500"
+            />
+            <button
+              onClick={handleRedeem}
+              disabled={!redeemCode.trim()}
+              className="rounded-md bg-amber-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-amber-700 disabled:opacity-50"
+            >
+              Redeem
+            </button>
+            {redeemMsg && <span className="text-xs text-gray-600">{redeemMsg}</span>}
+          </div>
+        </div>
+
         <div className="grid gap-6 lg:grid-cols-2">
           {/* Friends */}
           <div className="rounded-lg border border-gray-200 bg-white">
@@ -169,6 +262,7 @@ export default function SocialPage() {
             )}
           </div>
         </div>
+        </>
       )}
     </main>
   );
