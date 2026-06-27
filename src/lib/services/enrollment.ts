@@ -16,6 +16,7 @@ import { createSupabaseServiceClient } from "@/lib/supabase/server";
 import { assignParticipant } from "@/lib/services/randomization";
 import { getDefaults, PROFILE_FIELDS, type VisibilityLevel } from "@/lib/utils/privacy";
 import { trackEvent } from "@/lib/utils/track-event";
+import { recordPrivacyIndexSnapshot } from "@/lib/services/privacy-snapshots";
 
 export type PrivacyDefaultCondition = "private" | "neutral" | "public";
 
@@ -145,13 +146,20 @@ export async function enrollParticipant(userId: string): Promise<EnrollmentResul
     const hasVisibility = Object.keys(existingVisibility).length > 0;
 
     // 7. Merge metadata (never overwrite other keys); set initial visibility only if empty.
+    const initialVisibility = hasVisibility
+      ? (existingVisibility as Record<string, string>)
+      : computeInitialVisibility(ageBand, defaultCondition);
+
     const updates: Record<string, unknown> = {
       metadata: { ...(userRow?.metadata || {}), privacy_treatment: treatment },
     };
     if (!hasVisibility) {
-      updates.profile_visibility = computeInitialVisibility(ageBand, defaultCondition);
+      updates.profile_visibility = initialVisibility;
     }
     await supabase.from("users").update(updates).eq("id", userId);
+
+    // t0 of the privacy-index trajectory.
+    await recordPrivacyIndexSnapshot(userId, initialVisibility, "enrollment");
 
     // 8. Enroll + refresh sample size.
     await supabase

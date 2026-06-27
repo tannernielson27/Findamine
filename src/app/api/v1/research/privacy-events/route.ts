@@ -1,6 +1,7 @@
 import { NextRequest } from "next/server";
 import { createSupabaseServiceClient } from "@/lib/supabase/server";
 import { getAuthUser, errorResponse, ApiError } from "@/lib/utils/api-auth";
+import { recordPrivacyIndexSnapshot } from "@/lib/services/privacy-snapshots";
 
 // Log privacy-related events (Studies 1-3)
 export async function POST(request: NextRequest) {
@@ -40,6 +41,15 @@ export async function POST(request: NextRequest) {
       .single();
 
     if (error) throw new ApiError(500, error.message);
+
+    // Record a "change" point on the privacy-index trajectory.
+    if (body.event_type === "privacy_change" && body.new_value) {
+      await recordPrivacyIndexSnapshot(
+        user.id,
+        body.new_value as Record<string, string>,
+        "change"
+      );
+    }
 
     return Response.json({ event: data }, { status: 201 });
   } catch (error) {
