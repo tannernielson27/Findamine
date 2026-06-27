@@ -5,6 +5,7 @@ import { authLimiter } from "@/lib/utils/rate-limit";
 import { withLogging } from "@/lib/utils/with-logging";
 import { botGuard } from "@/lib/utils/bot-guard";
 import { trackEvent } from "@/lib/utils/track-event";
+import { enrollParticipant } from "@/lib/services/enrollment";
 
 export const POST = withLogging("POST /api/v1/auth/register", async (request: NextRequest) => {
   const blocked = await botGuard(request);
@@ -87,6 +88,10 @@ export const POST = withLogging("POST /api/v1/auth/register", async (request: Ne
     await supabase.auth.admin.deleteUser(authData.user.id);
     throw new ApiError(500, "Failed to create user profile");
   }
+
+  // Assign treatment + enroll at signup (idempotent; never throws). The (app)
+  // layout re-runs this on first authenticated load as a safety net.
+  await enrollParticipant(user.id);
 
   return Response.json(
     {
