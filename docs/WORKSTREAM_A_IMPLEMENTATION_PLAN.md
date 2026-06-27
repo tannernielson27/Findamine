@@ -9,6 +9,38 @@
 > criteria for each task. Paths are relative to `findamineapp/`. Next.js 16 App Router —
 > consult `node_modules/next/dist/docs/` before writing route code (per `AGENTS.md`).
 
+## Implementation status (updated 2026-06-27)
+
+Built on branch `feat/workstream-a-research-validity` (local; not yet pushed). Each task
+shipped green (78 tests passing, `tsc --noEmit` clean) and committed separately.
+
+| Task | Status | Notes |
+|------|--------|-------|
+| A1 | ⏳ mentor | Design decision (factor structure). No code. |
+| A2 | ✅ done | Enrollment/assignment, initial visibility, migration 044. |
+| A3 | ✅ done | Privacy-event logging (view/change/abandon, deltas, reversal). |
+| A4 | ✅ done | Index snapshots (t0/change/daily cron), migration 045. |
+| A5 | ◑ partial | Primitives + `canView` security fix + peer surfaces (friends, kudos, shoutouts, wall, own-team). **Deferred surfaces below.** |
+| A6 | ✅ done | Referral/minion economy backend + UI, migration 046. |
+| A7 | ✅ done | Survey T1/T2/T3 delivery pipeline, migration 047 (instruments seeded **draft**). |
+| A8 | ✅ done | Export: real aggregates + privacy trajectory. |
+| A9 | ✅ done | Researcher dashboard (balance, logging completeness, referral). |
+| A10 | ✅ done | Condition-aware defaults + neutral handling. |
+
+**Decisions still needed (block the remainder):**
+1. **A5 deferred surfaces** — leaderboard (does hiding `total_score` drop a user from the
+   board or just hide the name?), search (is a name-private user findable?), roster
+   (teacher authority — likely no peer filtering), team-browse + team chat. These change
+   UX/semantics and are product+mentor calls, not unilateral code changes.
+2. **A6 incentive calibration** — `REFERRAL_FRACTION` (currently 0.15) and point values,
+   for IRB/behavioral validity.
+3. **A7 validated instruments** — real scale items/wording/citations for the T1/T2/T3
+   surveys (seeded as draft placeholders; activate once entered).
+4. **A1 factor structure** — whether `privacy_default` stays a crossed confirmatory factor.
+
+**Also outstanding:** an integration/mock test for the export (A8) and dashboard (A9);
+the migrations (044–047) need to be applied to the Supabase project.
+
 ## Conventions observed in the codebase (follow these)
 
 - **API routes:** `src/app/api/v1/<area>/route.ts`; handlers use `getAuthUser(request)`,
