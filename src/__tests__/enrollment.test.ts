@@ -4,7 +4,7 @@ import {
   deriveTreatment,
   deriveDefaultCondition,
 } from "@/lib/services/enrollment";
-import { PROFILE_FIELDS } from "@/lib/utils/privacy";
+import { PROFILE_FIELDS, getDefaults } from "@/lib/utils/privacy";
 
 describe("computeInitialVisibility", () => {
   it("private → every field 'nobody'", () => {
@@ -34,6 +34,19 @@ describe("computeInitialVisibility", () => {
     // real_name default differs between kids (nobody) and adults (class)
     expect(kids["real_name"]).toBe("nobody");
     expect(adults["real_name"]).toBe("class");
+  });
+});
+
+describe("getDefaults with condition (A10)", () => {
+  it("private/public/neutral conditions match computeInitialVisibility", () => {
+    expect(getDefaults("adult", "private")).toEqual(computeInitialVisibility("adult", "private"));
+    expect(getDefaults("adult", "public")).toEqual(computeInitialVisibility("adult", "public"));
+    expect(getDefaults("adult", "neutral")).toEqual({});
+  });
+
+  it("age_band / absent falls back to age-band defaults", () => {
+    expect(getDefaults("adult", "age_band")).toEqual(getDefaults("adult"));
+    expect(Object.keys(getDefaults("adult")).length).toBe(PROFILE_FIELDS.length);
   });
 });
 

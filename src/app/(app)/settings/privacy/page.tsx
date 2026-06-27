@@ -43,10 +43,12 @@ export default function PrivacySettingsPage() {
           setTreatment(t);
           treatmentRef.current = t;
 
-          // Get existing visibility or defaults
+          // Get existing visibility, else condition-aware defaults. For the
+          // "neutral" default condition getDefaults returns {} → nothing is
+          // pre-selected and the user must choose on first use.
           const existing = data.user.profile_visibility || {};
-          const defaults = getDefaults(ageBand);
-          const loaded = { ...defaults, ...existing };
+          const defaultCondition = data.user.metadata?.privacy_default ?? null;
+          const loaded = { ...getDefaults(ageBand, defaultCondition), ...existing };
           setVisibility(loaded);
           originalRef.current = loaded;
           currentRef.current = loaded;

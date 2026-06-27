@@ -14,7 +14,7 @@
 
 import { createSupabaseServiceClient } from "@/lib/supabase/server";
 import { assignParticipant } from "@/lib/services/randomization";
-import { getDefaults, PROFILE_FIELDS, type VisibilityLevel } from "@/lib/utils/privacy";
+import { getDefaults, type VisibilityLevel } from "@/lib/utils/privacy";
 import { trackEvent } from "@/lib/utils/track-event";
 import { recordPrivacyIndexSnapshot } from "@/lib/services/privacy-snapshots";
 
@@ -42,20 +42,7 @@ export function computeInitialVisibility(
   ageBand: string,
   defaultCondition?: PrivacyDefaultCondition | null
 ): Record<string, VisibilityLevel> {
-  if (defaultCondition === "private") {
-    return Object.fromEntries(
-      PROFILE_FIELDS.map((f) => [f.key, "nobody" as VisibilityLevel])
-    );
-  }
-  if (defaultCondition === "public") {
-    return Object.fromEntries(
-      PROFILE_FIELDS.map((f) => [f.key, "everyone" as VisibilityLevel])
-    );
-  }
-  if (defaultCondition === "neutral") {
-    return {};
-  }
-  return getDefaults(ageBand);
+  return getDefaults(ageBand, defaultCondition);
 }
 
 /**
@@ -151,7 +138,11 @@ export async function enrollParticipant(userId: string): Promise<EnrollmentResul
       : computeInitialVisibility(ageBand, defaultCondition);
 
     const updates: Record<string, unknown> = {
-      metadata: { ...(userRow?.metadata || {}), privacy_treatment: treatment },
+      metadata: {
+        ...(userRow?.metadata || {}),
+        privacy_treatment: treatment,
+        privacy_default: defaultCondition ?? null,
+      },
     };
     if (!hasVisibility) {
       updates.profile_visibility = initialVisibility;

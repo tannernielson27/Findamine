@@ -118,9 +118,28 @@ export const CATEGORIES = [
 ];
 
 /**
- * Get default visibility settings based on age band.
+ * Get default visibility settings.
+ *
+ * With a `defaultCondition` (the experiment's privacy_default treatment):
+ *   private → every field "nobody"
+ *   public  → every field "everyone"
+ *   neutral → empty map (no pre-selection; user must choose on first use)
+ * Without one (or "age_band"), falls back to age-band defaults.
  */
-export function getDefaults(ageBand: string): Record<string, VisibilityLevel> {
+export function getDefaults(
+  ageBand: string,
+  defaultCondition?: "private" | "neutral" | "public" | "age_band" | null
+): Record<string, VisibilityLevel> {
+  if (defaultCondition === "private") {
+    return Object.fromEntries(PROFILE_FIELDS.map((f) => [f.key, "nobody" as VisibilityLevel]));
+  }
+  if (defaultCondition === "public") {
+    return Object.fromEntries(PROFILE_FIELDS.map((f) => [f.key, "everyone" as VisibilityLevel]));
+  }
+  if (defaultCondition === "neutral") {
+    return {};
+  }
+
   const defaults: Record<string, VisibilityLevel> = {};
   for (const field of PROFILE_FIELDS) {
     if (ageBand === "primary" || ageBand === "intermediate") {
