@@ -141,13 +141,22 @@ export function canView(
   viewerRelationship: "self" | "team" | "class" | "public",
   fieldVisibility: VisibilityLevel
 ): boolean {
-  const levels: VisibilityLevel[] = ["nobody", "team", "class", "everyone"];
-  const viewerLevel = viewerRelationship === "self" ? 4 :
-    viewerRelationship === "team" ? levels.indexOf("team") :
-    viewerRelationship === "class" ? levels.indexOf("class") :
-    levels.indexOf("everyone");
-  const requiredLevel = levels.indexOf(fieldVisibility);
-  return viewerLevel >= requiredLevel;
+  // Closer viewers have higher access; each field requires a minimum closeness.
+  // Ordering: public < class < team < self. A field set to "team" is visible to
+  // teammates and self only; "everyone" is the lowest bar; "nobody" is self-only.
+  const viewerAccess: Record<"self" | "team" | "class" | "public", number> = {
+    public: 1,
+    class: 2,
+    team: 3,
+    self: 4,
+  };
+  const requiredAccess: Record<VisibilityLevel, number> = {
+    everyone: 1,
+    class: 2,
+    team: 3,
+    nobody: 4,
+  };
+  return viewerAccess[viewerRelationship] >= requiredAccess[fieldVisibility];
 }
 
 /**
@@ -174,4 +183,35 @@ export function filterProfileForViewer(
     display_name: canView(viewerRelationship, displayNameLevel) ? (profile.display_name ?? null) : null,
     avatar_url: canView(viewerRelationship, avatarLevel) ? (profile.avatar_url ?? null) : null,
   };
+}
+
+export type ViewerRelationship = "self" | "team" | "class" | "public";
+
+/** The visibility key used by avatar settings (the field key is "avatar", the column is avatar_url). */
+export const PROFILE_FIELD_KEYS: string[] = PROFILE_FIELDS.map((f) => f.key);
+
+/**
+ * Whether a viewer may see a single logical profile field, given the owner's settings.
+ * Unset fields default to "everyone" (matches filterProfileForViewer). Pure + testable.
+ */
+export function canViewField(
+  visibility: Record<string, string> | undefined,
+  viewerRelationship: ViewerRelationship,
+  fieldKey: string
+): boolean {
+  if (viewerRelationship === "self") return true;
+  const level = ((visibility || {})[fieldKey] as VisibilityLevel) || "everyone";
+  return canView(viewerRelationship, level);
+}
+
+/**
+ * The set of profile field keys a viewer may see, given the owner's settings.
+ * Call sites use this to decide which fields/joins to include in a response. Pure.
+ */
+export function visibleFields(
+  visibility: Record<string, string> | undefined,
+  viewerRelationship: ViewerRelationship
+): string[] {
+  if (viewerRelationship === "self") return [...PROFILE_FIELD_KEYS];
+  return PROFILE_FIELD_KEYS.filter((key) => canViewField(visibility, viewerRelationship, key));
 }
