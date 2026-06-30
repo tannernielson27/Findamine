@@ -82,6 +82,9 @@ export default function PlayPage() {
   const [readingCheckPassed, setReadingCheckPassed] = useState(false);
   const [showTechniqueReview, setShowTechniqueReview] = useState(false);
   const [techniqueReviewDone, setTechniqueReviewDone] = useState(false);
+  const [reviewStrategies, setReviewStrategies] = useState<string[]>([]);
+  const [showReport, setShowReport] = useState(false);
+  const [reportDone, setReportDone] = useState(false);
   const [clueHintText, setClueHintText] = useState("");
   const [clueHintLevel, setClueHintLevel] = useState(0);
   const [clueHintTotal, setClueHintTotal] = useState(0);
@@ -204,6 +207,11 @@ export default function PlayPage() {
     setClueHintTotal(0);
     setGpsStatus("waiting");
     setError(null);
+    setShowTechniqueReview(false);
+    setTechniqueReviewDone(false);
+    setReviewStrategies([]);
+    setShowReport(false);
+    setReportDone(false);
   }, [currentIndex, currentFind, completedFinds]);
 
   // ── GPS watcher for navigate step ──────────────────
@@ -829,8 +837,10 @@ export default function PlayPage() {
                 </p>
                 {!hintRated && (
                   <div className="flex items-center gap-2 mt-2">
-                    <span className="text-[11px] text-yellow-600">Was this helpful?</span>
+                    <span className="text-[11px] text-yellow-600" id="hint-helpful-label">Was this helpful?</span>
                     <button
+                      aria-label="Hint was helpful"
+                      aria-describedby="hint-helpful-label"
                       onClick={() => {
                         fetch("/api/v1/hints/rate", {
                           method: "POST",
@@ -839,11 +849,13 @@ export default function PlayPage() {
                         });
                         setHintRated(true);
                       }}
-                      className="text-xs px-2 py-0.5 rounded bg-green-100 text-green-700 hover:bg-green-200"
+                      className="text-xs px-2 py-1 rounded bg-green-100 text-green-700 hover:bg-green-200"
                     >
-                      👍
+                      <span aria-hidden="true">👍</span>
                     </button>
                     <button
+                      aria-label="Hint was not helpful"
+                      aria-describedby="hint-helpful-label"
                       onClick={() => {
                         fetch("/api/v1/hints/rate", {
                           method: "POST",
@@ -852,9 +864,9 @@ export default function PlayPage() {
                         });
                         setHintRated(true);
                       }}
-                      className="text-xs px-2 py-0.5 rounded bg-red-100 text-red-700 hover:bg-red-200"
+                      className="text-xs px-2 py-1 rounded bg-red-100 text-red-700 hover:bg-red-200"
                     >
-                      👎
+                      <span aria-hidden="true">👎</span>
                     </button>
                   </div>
                 )}
@@ -1005,8 +1017,8 @@ export default function PlayPage() {
                   </button>
                 ) : (
                   <div className="rounded-lg bg-sky-50 border border-sky-200 p-3">
-                    <p className="text-xs font-medium text-sky-700 mb-2">What helped you?</p>
-                    <div className="flex flex-wrap gap-1.5 mb-2">
+                    <p className="text-xs font-medium text-sky-700 mb-2" id="review-strategies-label">What helped you?</p>
+                    <div className="flex flex-wrap gap-1.5 mb-2" role="group" aria-labelledby="review-strategies-label">
                       {[
                         { key: "read_carefully", label: "Read carefully" },
                         { key: "used_hint", label: "Used a hint" },
@@ -1014,38 +1026,54 @@ export default function PlayPage() {
                         { key: "tried_and_learned", label: "Tried & learned" },
                         { key: "remembered", label: "Remembered from primer" },
                         { key: "guessed", label: "Guessed" },
-                      ].map((s) => (
-                        <button
-                          key={s.key}
-                          onClick={() => {
-                            const el = document.querySelector(`[data-strategy="${s.key}"]`);
-                            el?.classList.toggle("bg-sky-200");
-                            el?.classList.toggle("text-sky-800");
-                          }}
-                          data-strategy={s.key}
-                          className="rounded-full px-2.5 py-1 text-[11px] bg-gray-100 text-gray-600 transition"
-                        >
-                          {s.label}
-                        </button>
-                      ))}
+                      ].map((s) => {
+                        const selected = reviewStrategies.includes(s.key);
+                        return (
+                          <button
+                            key={s.key}
+                            type="button"
+                            aria-pressed={selected}
+                            onClick={() =>
+                              setReviewStrategies((prev) =>
+                                prev.includes(s.key) ? prev.filter((k) => k !== s.key) : [...prev, s.key]
+                              )
+                            }
+                            className={`rounded-full px-2.5 py-1 text-[11px] transition ${
+                              selected ? "bg-sky-200 text-sky-800" : "bg-gray-100 text-gray-600"
+                            }`}
+                          >
+                            {s.label}
+                          </button>
+                        );
+                      })}
                     </div>
-                    <p className="text-xs text-sky-700 mb-1">How confident are you?</p>
-                    <div className="flex gap-2 mb-2">
-                      {["😞", "😐", "😊"].map((emoji, i) => (
-                        <button key={i} className="text-lg hover:scale-110 transition" onClick={() => {
-                          fetch("/api/v1/technique-review", {
-                            method: "POST",
-                            headers: { "Content-Type": "application/json" },
-                            body: JSON.stringify({
-                              hunt_id: huntId,
-                              confidence: i + 1,
-                              strategies: Array.from(document.querySelectorAll("[data-strategy].bg-sky-200")).map(el => el.getAttribute("data-strategy")),
-                            }),
-                          });
-                          setTechniqueReviewDone(true);
-                          setShowTechniqueReview(false);
-                        }}>
-                          {emoji}
+                    <p className="text-xs text-sky-700 mb-1" id="review-confidence-label">How confident are you?</p>
+                    <div className="flex gap-2 mb-2" role="group" aria-labelledby="review-confidence-label">
+                      {[
+                        { emoji: "😞", label: "Not confident" },
+                        { emoji: "😐", label: "Somewhat confident" },
+                        { emoji: "😊", label: "Very confident" },
+                      ].map((c, i) => (
+                        <button
+                          key={i}
+                          type="button"
+                          aria-label={c.label}
+                          className="text-2xl leading-none p-1 rounded hover:scale-110 transition"
+                          onClick={() => {
+                            fetch("/api/v1/technique-review", {
+                              method: "POST",
+                              headers: { "Content-Type": "application/json" },
+                              body: JSON.stringify({
+                                hunt_id: huntId,
+                                confidence: i + 1,
+                                strategies: reviewStrategies,
+                              }),
+                            });
+                            setTechniqueReviewDone(true);
+                            setShowTechniqueReview(false);
+                          }}
+                        >
+                          <span aria-hidden="true">{c.emoji}</span>
                         </button>
                       ))}
                     </div>
@@ -1096,30 +1124,60 @@ export default function PlayPage() {
         )}
       </div>
 
-      {/* Report a problem */}
+      {/* Report a problem — accessible inline disclosure (no prompt/alert) */}
       <div className="mt-4 text-center">
-        <button
-          onClick={() => {
-            const category = prompt("What's the issue?\n1. Mean/hurtful\n2. Inappropriate\n3. Spam\n4. Off-topic\n5. Other");
-            const cats = ["mean_hurtful", "inappropriate", "spam", "off_topic", "other"];
-            const idx = parseInt(category || "0") - 1;
-            if (idx >= 0 && idx < cats.length) {
-              fetch("/api/v1/reports", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({
-                  category: cats[idx],
-                  target_type: "find",
-                  target_id: currentFind?.id || huntId,
-                }),
-              });
-              alert("Thanks for reporting. A teacher will review this.");
-            }
-          }}
-          className="text-[10px] text-gray-400 hover:text-gray-600"
-        >
-          Report a problem
-        </button>
+        {reportDone ? (
+          <p role="status" className="text-xs text-gray-500">Thanks for reporting. A teacher will review this.</p>
+        ) : !showReport ? (
+          <button
+            onClick={() => setShowReport(true)}
+            aria-expanded={false}
+            className="text-xs text-gray-400 hover:text-gray-600 underline"
+          >
+            Report a problem
+          </button>
+        ) : (
+          <div className="inline-block rounded-lg border border-gray-200 bg-white p-3 text-left">
+            <p className="text-xs font-medium text-gray-700 mb-2" id="report-label">What&apos;s the issue?</p>
+            <div className="flex flex-wrap gap-1.5" role="group" aria-labelledby="report-label">
+              {[
+                { key: "mean_hurtful", label: "Mean / hurtful" },
+                { key: "inappropriate", label: "Inappropriate" },
+                { key: "spam", label: "Spam" },
+                { key: "off_topic", label: "Off-topic" },
+                { key: "other", label: "Other" },
+              ].map((c) => (
+                <button
+                  key={c.key}
+                  type="button"
+                  onClick={() => {
+                    fetch("/api/v1/reports", {
+                      method: "POST",
+                      headers: { "Content-Type": "application/json" },
+                      body: JSON.stringify({
+                        category: c.key,
+                        target_type: "find",
+                        target_id: currentFind?.id || huntId,
+                      }),
+                    }).catch(() => {});
+                    setShowReport(false);
+                    setReportDone(true);
+                  }}
+                  className="rounded-full border border-gray-200 bg-gray-50 px-3 py-1.5 text-xs text-gray-700 hover:bg-gray-100 min-h-[36px]"
+                >
+                  {c.label}
+                </button>
+              ))}
+              <button
+                type="button"
+                onClick={() => setShowReport(false)}
+                className="rounded-full px-3 py-1.5 text-xs text-gray-400 hover:text-gray-600 min-h-[36px]"
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        )}
       </div>
     </main>
   );
