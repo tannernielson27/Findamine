@@ -135,7 +135,50 @@ export async function GET(request: NextRequest) {
         }
       );
 
-      return Response.json({ entries, identity_mode: identityMode });
+      // Viewer's own standing — precise even when outside the visible top-N.
+      // Self data, so no name-redaction applies. Motivation surface (B5).
+      let me: { rank: number; score: number; gap_to_next: number | null } | null = null;
+      if (currentUser) {
+        const { data: mySession } = await supabase
+          .from("play_sessions")
+          .select("total_score")
+          .eq("hunt_id", huntId)
+          .eq("user_id", currentUser.id)
+          .eq("status", "completed")
+          .maybeSingle();
+
+        if (mySession) {
+          const myScore = (mySession.total_score as number) ?? 0;
+          const { count } = await supabase
+            .from("play_sessions")
+            .select("user_id", { count: "exact", head: true })
+            .eq("hunt_id", huntId)
+            .eq("status", "completed")
+            .gt("total_score", myScore);
+          const { data: nextRow } = await supabase
+            .from("play_sessions")
+            .select("total_score")
+            .eq("hunt_id", huntId)
+            .eq("status", "completed")
+            .gt("total_score", myScore)
+            .order("total_score", { ascending: true })
+            .limit(1)
+            .maybeSingle();
+
+          me = {
+            rank: (count ?? 0) + 1,
+            score: myScore,
+            gap_to_next: nextRow ? (nextRow.total_score as number) - myScore : null,
+          };
+        }
+      }
+
+      return Response.json({
+        entries,
+        identity_mode: identityMode,
+        viewer_id: currentUser?.id ?? null,
+        me,
+      });
     }
 
     // Overall leaderboard: aggregated per user via RPC, always protect children
@@ -173,7 +216,12 @@ export async function GET(request: NextRequest) {
       }
     );
 
-    return Response.json({ entries, identity_mode: "codename_assigned" });
+    return Response.json({
+      entries,
+      identity_mode: "codename_assigned",
+      viewer_id: currentUser?.id ?? null,
+      me: null, // overall standing is derived client-side from visible entries
+    });
   } catch (error) {
     return errorResponse(error);
   }
