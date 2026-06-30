@@ -1,11 +1,13 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import {
   PROFILE_FIELDS, VISIBILITY_LABELS, CATEGORIES,
   type VisibilityLevel, type PrivacyTreatment,
   getDefaults,
 } from "@/lib/utils/privacy";
+import { logPrivacyEvent, diffVisibility, classifyChange } from "@/lib/utils/privacy-tracking";
+import { computePrivacyIndex } from "@/lib/utils/privacy-index";
 
 const VISIBILITY_LEVELS: VisibilityLevel[] = ["nobody", "team", "class", "everyone"];
 
@@ -16,6 +18,21 @@ export default function PrivacySettingsPage() {
   const [saved, setSaved] = useState(false);
   const [ageBand, setAgeBand] = useState("intermediate");
 
+  // ── Research instrumentation (Task A3) ──────────────────────────
+  const openedAtRef = useRef<number>(Date.now());
+  const originalRef = useRef<Record<string, VisibilityLevel>>({}); // last saved/loaded state
+  const currentRef = useRef<Record<string, VisibilityLevel>>({});  // latest in-flight state
+  const clickCountRef = useRef(0);
+  const treatmentRef = useRef<string>("moderate");
+  const sessionIdRef = useRef<string>(
+    typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : String(Date.now())
+  );
+
+  // Keep a ref mirror of visibility so the unmount handler sees the latest value.
+  useEffect(() => {
+    currentRef.current = visibility;
+  }, [visibility]);
+
   useEffect(() => {
     fetch("/api/v1/auth/me")
       .then((r) => r.json())
@@ -24,34 +41,104 @@ export default function PrivacySettingsPage() {
           // Get treatment from metadata
           const t = data.user.metadata?.privacy_treatment || "moderate";
           setTreatment(t);
+          treatmentRef.current = t;
 
-          // Get existing visibility or defaults
+          // Get existing visibility, else condition-aware defaults. For the
+          // "neutral" default condition getDefaults returns {} → nothing is
+          // pre-selected and the user must choose on first use.
           const existing = data.user.profile_visibility || {};
-          const defaults = getDefaults(ageBand);
-          setVisibility({ ...defaults, ...existing });
+          const defaultCondition = data.user.metadata?.privacy_default ?? null;
+          const loaded = { ...getDefaults(ageBand, defaultCondition), ...existing };
+          setVisibility(loaded);
+          originalRef.current = loaded;
+          currentRef.current = loaded;
+          openedAtRef.current = Date.now();
+
+          // Log that the privacy surface was viewed (denominator for engagement).
+          logPrivacyEvent({
+            event_type: "privacy_view",
+            page: "settings_privacy",
+            session_id: sessionIdRef.current,
+            metadata: { treatment: t, index: computePrivacyIndex(loaded) },
+          });
         }
       })
       .catch(() => {});
   }, [ageBand]);
 
+  // On unmount, if the user changed settings but never saved, log abandonment.
+  useEffect(() => {
+    return () => {
+      const deltas = diffVisibility(originalRef.current, currentRef.current);
+      if (deltas.length === 0) return;
+      logPrivacyEvent({
+        event_type: "privacy_abandon",
+        page: "settings_privacy",
+        old_value: originalRef.current,
+        new_value: currentRef.current,
+        duration_ms: Date.now() - openedAtRef.current,
+        click_count: clickCountRef.current,
+        session_id: sessionIdRef.current,
+        metadata: {
+          treatment: treatmentRef.current,
+          deltas,
+          direction: classifyChange(deltas),
+        },
+      });
+    };
+  }, []);
+
   async function handleSave() {
     setSaving(true);
+
+    const oldValue = originalRef.current;
+    const deltas = diffVisibility(oldValue, visibility);
+    const direction = classifyChange(deltas);
+
     await fetch("/api/v1/auth/profile", {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ profile_visibility: visibility }),
     });
+
+    // Log the privacy change (primary research outcome). A save with no net delta
+    // but prior clicks is a reversal (fiddled and ended where they started).
+    logPrivacyEvent({
+      event_type: "privacy_change",
+      page: "settings_privacy",
+      old_value: oldValue,
+      new_value: visibility,
+      duration_ms: Date.now() - openedAtRef.current,
+      click_count: clickCountRef.current,
+      session_id: sessionIdRef.current,
+      metadata: {
+        treatment: treatmentRef.current,
+        deltas,
+        direction,
+        reversed: deltas.length === 0 && clickCountRef.current > 0,
+        index_before: computePrivacyIndex(oldValue),
+        index_after: computePrivacyIndex(visibility),
+      },
+    });
+
+    // Reset the baseline so subsequent saves diff from this saved state.
+    originalRef.current = visibility;
+    openedAtRef.current = Date.now();
+    clickCountRef.current = 0;
+
     setSaving(false);
     setSaved(true);
     setTimeout(() => setSaved(false), 2000);
   }
 
   function setFieldVisibility(key: string, level: VisibilityLevel) {
+    clickCountRef.current += 1;
     setVisibility((prev) => ({ ...prev, [key]: level }));
     setSaved(false);
   }
 
   function setCategoryVisibility(category: string, level: VisibilityLevel) {
+    clickCountRef.current += 1;
     const fields = PROFILE_FIELDS.filter((f) => f.category === category);
     setVisibility((prev) => {
       const next = { ...prev };
@@ -62,6 +149,7 @@ export default function PrivacySettingsPage() {
   }
 
   function setMasterVisibility(level: VisibilityLevel) {
+    clickCountRef.current += 1;
     setVisibility((prev) => {
       const next = { ...prev };
       PROFILE_FIELDS.forEach((f) => { next[f.key] = level; });

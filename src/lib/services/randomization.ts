@@ -52,14 +52,15 @@ export async function assignParticipant(
 
   const { data: user } = await supabase
     .from("users")
-    .select("school_id")
+    .select("school_id, age_band")
     .eq("id", userId)
     .single();
 
-  // Build stratum key
+  // Build stratum key. Prefer user_profiles.effective_band, fall back to
+  // users.age_band (the two are not always populated together for new users).
   const stratumParts: string[] = [];
   if (config.stratifyBy?.includes("age_band")) {
-    stratumParts.push(`band:${userProfile?.effective_band || "unknown"}`);
+    stratumParts.push(`band:${userProfile?.effective_band || user?.age_band || "unknown"}`);
   }
   if (config.stratifyBy?.includes("school_id")) {
     stratumParts.push(`school:${user?.school_id || "none"}`);

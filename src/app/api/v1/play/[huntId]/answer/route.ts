@@ -2,6 +2,7 @@ import { NextRequest } from "next/server";
 import { createSupabaseServiceClient } from "@/lib/supabase/server";
 import { getAuthUser, errorResponse, ApiError } from "@/lib/utils/api-auth";
 import { calculateScore, getGrowthMindsetMessage } from "@/lib/services/scoring";
+import { awardReferralPoints } from "@/lib/services/referral";
 import { logger } from "@/lib/utils/logger";
 import { playLimiter } from "@/lib/utils/rate-limit";
 
@@ -183,6 +184,9 @@ export async function POST(
         .from("play_sessions")
         .update({ total_score: totalScore })
         .eq("id", session.id);
+
+      // Referral economy: a recruiter earns a share when their minion scores.
+      await awardReferralPoints(user.id, scoringResult.totalScore, find_id, huntId);
     }
 
     logger.info("play.answer", { userId: user.id, huntId, findId: find_id, score: scoringResult.totalScore, correct: isCorrect, attempt: attemptCount, durationMs: Math.round(performance.now() - start) });

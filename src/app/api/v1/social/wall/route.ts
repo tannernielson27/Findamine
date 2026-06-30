@@ -2,6 +2,14 @@ import { NextRequest } from "next/server";
 import { createSupabaseServiceClient } from "@/lib/supabase/server";
 import { getAuthUser, blockChildren, errorResponse, ApiError } from "@/lib/utils/api-auth";
 import { socialLimiter } from "@/lib/utils/rate-limit";
+import { filterProfileForViewer } from "@/lib/utils/privacy";
+
+type EmbeddedUser = {
+  id: string;
+  display_name: string | null;
+  avatar_url: string | null;
+  profile_visibility?: Record<string, string>;
+};
 
 export async function GET(request: NextRequest) {
   try {
@@ -16,13 +24,23 @@ export async function GET(request: NextRequest) {
 
     const { data } = await supabase
       .from("wall_posts")
-      .select("*, users(id, display_name, avatar_url)")
+      .select("*, users(id, display_name, avatar_url, profile_visibility)")
       .eq("team_id", teamId)
       .neq("moderation_status", "removed")
       .order("created_at", { ascending: false })
       .limit(50);
 
-    return Response.json({ posts: data || [] });
+    // Wall is team-scoped: authors are teammates, so the viewer relationship is
+    // "team" (or "self"). Honors fields set to "nobody". Anonymous posts already
+    // hide identity client-side via is_anonymous; filtering is layered, not replaced.
+    const posts = (data || []).map((r) => {
+      const author = r.users as EmbeddedUser | null;
+      if (!author?.id) return r;
+      const rel = author.id === user.id ? "self" : "team";
+      return { ...r, users: { id: author.id, ...filterProfileForViewer(author, rel) } };
+    });
+
+    return Response.json({ posts });
   } catch (error) {
     return errorResponse(error);
   }

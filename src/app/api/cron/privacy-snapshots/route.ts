@@ -1,0 +1,64 @@
+/**
+ * Daily privacy-index snapshot cron (Workstream A / Task A4).
+ *
+ * For each enrolled, non-withdrawn participant, records a "scheduled" snapshot of
+ * their current restrictiveness so the trajectory exists even when settings are
+ * untouched. Authenticated with CRON_SECRET (same pattern as cluster-threats).
+ */
+
+import { NextRequest } from "next/server";
+import { createSupabaseServiceClient } from "@/lib/supabase/server";
+import { computePrivacyIndex } from "@/lib/utils/privacy-index";
+
+export const maxDuration = 60; // seconds
+
+function safeCompare(a: string, b: string): boolean {
+  if (a.length !== b.length) return false;
+  let mismatch = 0;
+  for (let i = 0; i < a.length; i++) mismatch |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  return mismatch === 0;
+}
+
+export async function GET(request: NextRequest) {
+  const auth = request.headers.get("authorization");
+  const secret = process.env.CRON_SECRET;
+  if (!secret || !auth || !safeCompare(auth, `Bearer ${secret}`)) {
+    return Response.json({ error: "Unauthorized" }, { status: 401 });
+  }
+
+  const supabase = await createSupabaseServiceClient();
+
+  // Distinct enrolled, non-withdrawn participants across active studies.
+  const { data: enrollments } = await supabase
+    .from("study_enrollments")
+    .select("user_id")
+    .is("withdrawn_at", null);
+
+  const userIds = [...new Set((enrollments || []).map((e) => e.user_id))];
+  if (userIds.length === 0) {
+    return Response.json({ participants: 0, snapshots: 0 });
+  }
+
+  // Current visibility for each participant.
+  const { data: users } = await supabase
+    .from("users")
+    .select("id, profile_visibility")
+    .in("id", userIds);
+
+  const rows = (users || []).map((u) => ({
+    user_id: u.id,
+    index_value: computePrivacyIndex((u.profile_visibility || {}) as Record<string, string>),
+    source: "scheduled" as const,
+    visibility: u.profile_visibility || {},
+  }));
+
+  let written = 0;
+  // Insert in chunks to stay well under payload limits.
+  for (let i = 0; i < rows.length; i += 500) {
+    const chunk = rows.slice(i, i + 500);
+    const { error } = await supabase.from("privacy_index_snapshots").insert(chunk);
+    if (!error) written += chunk.length;
+  }
+
+  return Response.json({ participants: userIds.length, snapshots: written });
+}

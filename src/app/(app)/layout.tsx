@@ -2,6 +2,7 @@ import { createSupabaseServerClient, createSupabaseServiceClient } from "@/lib/s
 import Navbar from "@/components/layout/navbar";
 import Onboarding from "@/components/layout/onboarding";
 import { AgeBandProvider } from "@/lib/themes/age-band-provider";
+import { enrollParticipant } from "@/lib/services/enrollment";
 import type { AgeBand } from "@/lib/themes/tokens";
 
 export default async function AppLayout({ children }: { children: React.ReactNode }) {
@@ -20,6 +21,12 @@ export default async function AppLayout({ children }: { children: React.ReactNod
       .is("deleted_at", null)
       .single();
     profile = data;
+
+    // Auto-enroll into the active study (idempotent; never throws). This is the
+    // canonical enrollment trigger — runs once the user is real and authenticated.
+    if (profile) {
+      await enrollParticipant(profile.id);
+    }
 
     // Get age band
     if (profile) {

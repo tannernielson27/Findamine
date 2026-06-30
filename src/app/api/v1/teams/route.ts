@@ -1,6 +1,28 @@
 import { NextRequest } from "next/server";
 import { createSupabaseServiceClient } from "@/lib/supabase/server";
 import { getAuthUser, errorResponse, ApiError } from "@/lib/utils/api-auth";
+import { filterProfileForViewer, type ViewerRelationship } from "@/lib/utils/privacy";
+
+type EmbeddedUser = {
+  id: string;
+  display_name: string | null;
+  avatar_url: string | null;
+  profile_visibility?: Record<string, string>;
+};
+
+// Filter the embedded `users` on each team_member of a team object.
+function filterTeamMembers(team: unknown, relFor: (userId: string) => ViewerRelationship) {
+  const t = team as { team_members?: Array<{ user_id: string; users: EmbeddedUser | null }> } | null;
+  if (!t?.team_members) return team;
+  return {
+    ...t,
+    team_members: t.team_members.map((m) => {
+      const u = m.users;
+      if (!u?.id) return m;
+      return { ...m, users: { id: u.id, ...filterProfileForViewer(u, relFor(u.id)) } };
+    }),
+  };
+}
 
 export async function GET(request: NextRequest) {
   try {
@@ -16,11 +38,14 @@ export async function GET(request: NextRequest) {
     if (mine === "true") {
       const { data } = await supabase
         .from("team_members")
-        .select("team_id, role, teams(*, team_members(user_id, role, users(id, display_name, avatar_url)))")
+        .select("team_id, role, teams(*, team_members(user_id, role, users(id, display_name, avatar_url, profile_visibility)))")
         .eq("user_id", user.id)
         .eq("status", "active");
 
-      return Response.json({ teams: (data || []).map((d: { teams: unknown }) => d.teams) });
+      // These are the viewer's own teams → all members are teammates (or self).
+      const relFor = (id: string): ViewerRelationship => (id === user.id ? "self" : "team");
+      const teams = (data || []).map((d: { teams: unknown }) => filterTeamMembers(d.teams, relFor));
+      return Response.json({ teams });
     }
 
     if (huntId) {
