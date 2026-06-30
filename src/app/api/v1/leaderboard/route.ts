@@ -2,6 +2,8 @@ import { NextRequest } from "next/server";
 import { createSupabaseServiceClient } from "@/lib/supabase/server";
 import { getAuthUser, errorResponse, ApiError } from "@/lib/utils/api-auth";
 import { generalLimiter } from "@/lib/utils/rate-limit";
+import { canViewField } from "@/lib/utils/privacy";
+import { getViewerRelationships } from "@/lib/utils/viewer";
 
 // Roles whose names are never shown publicly on leaderboards
 const PROTECTED_ROLES = ["child", "teen"];
@@ -11,6 +13,7 @@ interface LeaderboardUser {
   display_name: string | null;
   avatar_url: string | null;
   role: string;
+  profile_visibility?: Record<string, string>;
 }
 
 /**
@@ -82,12 +85,22 @@ export async function GET(request: NextRequest) {
       const { data } = await supabase
         .from("play_sessions")
         .select(
-          "user_id, total_score, codename, users(id, display_name, avatar_url, role)"
+          "user_id, total_score, codename, users(id, display_name, avatar_url, role, profile_visibility)"
         )
         .eq("hunt_id", huntId)
         .eq("status", "completed")
         .order("total_score", { ascending: false })
         .limit(limit);
+
+      // In real_name mode, respect each player's display_name visibility: if the
+      // viewer isn't permitted to see the name, redact it (keep them on the board).
+      let relMap = new Map<string, "self" | "team" | "class" | "public">();
+      if (identityMode === "real_name" && !isHuntOwner) {
+        const targetIds = (data || []).map((r) => r.user_id as string);
+        relMap = currentUser
+          ? await getViewerRelationships(currentUser.id, targetIds)
+          : new Map(targetIds.map((id) => [id, "public" as const]));
+      }
 
       const entries = (data || []).map(
         (row: Record<string, unknown>) => {
@@ -99,13 +112,20 @@ export async function GET(request: NextRequest) {
 
           const codename = row.codename as string | null;
 
+          // Hide the name when the viewer lacks display_name permission.
+          const rel = relMap.get(row.user_id as string) ?? "public";
+          const nameAllowed =
+            identityMode !== "real_name" ||
+            canViewField(user?.profile_visibility, rel, "display_name");
+          const effectiveMode = nameAllowed ? identityMode : "codename_assigned";
+
           const identity = isHuntOwner
             ? {
                 display_name: user?.display_name ?? null,
                 avatar_url: user?.avatar_url ?? null,
                 codename,
               }
-            : redactEntry(user, codename, identityMode);
+            : redactEntry(user, codename, effectiveMode);
 
           return {
             user_id: row.user_id as string,
