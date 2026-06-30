@@ -6,6 +6,7 @@
  * knob (RESEARCH_READINESS_PLAN.md §6 — to confirm with the mentor/IRB).
  */
 
+import { randomInt } from "crypto";
 import { createSupabaseServiceClient } from "@/lib/supabase/server";
 import { trackEvent } from "@/lib/utils/track-event";
 
@@ -23,11 +24,13 @@ export function computeReferralPoints(
 
 /** Generate a short, human-shareable referral code. */
 export function generateReferralCode(): string {
-  // 8 chars, unambiguous alphabet (no 0/O/1/I).
+  // 8 chars, unambiguous alphabet (no 0/O/1/I). Use the OS CSPRNG so codes
+  // aren't predictable — guessable codes would let someone attach as another
+  // user's minion without consent and game the incentive economy.
   const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
   let code = "";
   for (let i = 0; i < 8; i++) {
-    code += alphabet[Math.floor(Math.random() * alphabet.length)];
+    code += alphabet[randomInt(0, alphabet.length)];
   }
   return code;
 }
