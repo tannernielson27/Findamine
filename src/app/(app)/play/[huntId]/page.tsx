@@ -7,6 +7,11 @@ import HotColdMeter from "@/components/play/hot-cold-meter";
 import ChallengeInput from "@/components/play/challenge-input";
 import NavigateMap from "@/components/maps/navigate-map";
 import { Celebration } from "@/components/ui/celebration";
+import {
+  celebrationForResult,
+  arrivalCelebration,
+  type CelebrationIntensity,
+} from "@/lib/play/celebration";
 
 type StopStep = "prime" | "reading_check" | "clue" | "navigate" | "challenge" | "capture" | "feedback";
 
@@ -87,6 +92,10 @@ export default function PlayPage() {
   const [userPos, setUserPos] = useState<{ lat: number; lng: number } | null>(null);
   const [showCelebration, setShowCelebration] = useState(false);
   const [celebrationMessage, setCelebrationMessage] = useState("");
+  const [celebrationSub, setCelebrationSub] = useState<string | undefined>(undefined);
+  const [celebrationIntensity, setCelebrationIntensity] = useState<CelebrationIntensity>("medium");
+  const [sessionScore, setSessionScore] = useState(0);
+  const [arrivedCelebrated, setArrivedCelebrated] = useState(false);
   const [huntComplete, setHuntComplete] = useState(false);
   const [huntSummary, setHuntSummary] = useState<{
     totalScore: number;
@@ -127,12 +136,21 @@ export default function PlayPage() {
         const progressRes = await safeFetch(`/api/v1/play/${huntId}/progress`);
         const progressData = await progressRes.json();
 
+        const doneCompletions = (progressData.completions || []).filter(
+          (c: { completed_at: string | null }) => c.completed_at
+        );
         const completed = new Set<string>(
-          (progressData.completions || [])
-            .filter((c: { completed_at: string | null }) => c.completed_at)
-            .map((c: { find_id: string }) => c.find_id)
+          doneCompletions.map((c: { find_id: string }) => c.find_id)
         );
         setCompletedFinds(completed);
+
+        // Seed the running-score chip from work already done this session.
+        const priorScore = (progressData.session?.total_score as number | undefined) ??
+          doneCompletions.reduce(
+            (sum: number, c: { score?: number }) => sum + (c.score || 0),
+            0
+          );
+        setSessionScore(priorScore);
 
         // Jump to first incomplete
         const allFinds = findsData.finds || [];
@@ -170,6 +188,7 @@ export default function PlayPage() {
     setCanRetry(false);
     setHotCold(null);
     setArrived(false);
+    setArrivedCelebrated(false);
     setHintText("");
     setHintLevel(0);
     setClueHintText("");
@@ -210,6 +229,15 @@ export default function PlayPage() {
           if (data.hot_cold) setHotCold(data.hot_cold);
           if (data.arrived) {
             setArrived(true);
+            // The "you found it!" beat — the most satisfying moment in a hunt.
+            if (!arrivedCelebrated) {
+              const beat = arrivalCelebration();
+              setCelebrationMessage(beat.headline);
+              setCelebrationSub(undefined);
+              setCelebrationIntensity(beat.intensity);
+              setShowCelebration(true);
+              setArrivedCelebrated(true);
+            }
             setStep("challenge");
           }
         } catch {
@@ -335,12 +363,24 @@ export default function PlayPage() {
 
       if (data.is_complete) {
         setCompletedFinds((prev) => new Set([...prev, currentFind.id]));
-        setCelebrationMessage(
-          data.feedback?.type === "correct"
-            ? "Great job! You got it!"
-            : "Nice effort! Moving on."
+        // Surface the payoff immediately — points land in the celebration, not
+        // buried behind the optional photo step.
+        const celeb = celebrationForResult(
+          {
+            feedbackType: data.feedback?.type,
+            score: data.score,
+            attempt: data.attempt,
+            breakdown: data.breakdown,
+          },
+          !!huntMeta.hide_scores
         );
+        setCelebrationMessage(celeb.headline);
+        setCelebrationSub(celeb.points != null ? `+${celeb.points} points` : undefined);
+        setCelebrationIntensity(celeb.intensity);
         setShowCelebration(true);
+        if (typeof data.score === "number" && !huntMeta.hide_scores) {
+          setSessionScore((s) => s + data.score);
+        }
         setStep("capture");
       }
     } catch (err) {
@@ -348,7 +388,7 @@ export default function PlayPage() {
     } finally {
       submittingRef.current = false;
     }
-  }, [currentFind, huntId, answer]);
+  }, [currentFind, huntId, answer, huntMeta.hide_scores]);
 
   const handleCaptureSkip = useCallback(() => {
     setStep("feedback");
@@ -378,11 +418,14 @@ export default function PlayPage() {
       });
       setHuntComplete(true);
       setCelebrationMessage("Hunt Complete!");
+      const finalScore = progress.session?.total_score || 0;
+      setCelebrationSub(!huntMeta.hide_scores && finalScore ? `${finalScore} points total` : undefined);
+      setCelebrationIntensity("high");
       setShowCelebration(true);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to complete hunt");
     }
-  }, [huntId, completedFinds.size, finds.length]);
+  }, [huntId, completedFinds.size, finds.length, huntMeta.hide_scores]);
 
   // ── Loading / Error states ─────────────────────────
 
@@ -422,6 +465,8 @@ export default function PlayPage() {
         <Celebration
           show={showCelebration}
           message={celebrationMessage}
+          subMessage={celebrationSub}
+          intensity={celebrationIntensity}
           onComplete={() => setShowCelebration(false)}
         />
 
@@ -480,6 +525,8 @@ export default function PlayPage() {
       <Celebration
         show={showCelebration}
         message={celebrationMessage}
+        subMessage={celebrationSub}
+        intensity={celebrationIntensity}
         onComplete={() => setShowCelebration(false)}
       />
 
@@ -494,13 +541,24 @@ export default function PlayPage() {
       )}
 
       {/* Progress bar */}
-      <div className="flex justify-between text-sm mb-1.5">
+      <div className="flex justify-between items-center text-sm mb-1.5">
         <span className="font-[family-name:var(--font-display)] font-semibold text-gray-800">
           Stop {currentIndex + 1} of {finds.length}
         </span>
-        <span className="font-[family-name:var(--font-handwritten)] text-lg text-brand">
-          {totalCompleted}/{finds.length} done
-        </span>
+        <div className="flex items-center gap-3">
+          {!huntMeta.hide_scores && (
+            <span
+              className="inline-flex items-center gap-1 rounded-full bg-brand-light/60 px-2.5 py-0.5 font-[family-name:var(--font-display)] font-bold text-brand-dark tabular-nums"
+              aria-label={`${sessionScore} points so far`}
+            >
+              <span aria-hidden="true">⭐</span>
+              {sessionScore}
+            </span>
+          )}
+          <span className="font-[family-name:var(--font-handwritten)] text-lg text-brand">
+            {totalCompleted}/{finds.length} done
+          </span>
+        </div>
       </div>
       <div className="h-3 rounded-full bg-gray-100 mb-4 overflow-hidden shadow-inner" role="progressbar" aria-valuenow={totalCompleted} aria-valuemin={0} aria-valuemax={finds.length} aria-label={`Hunt progress: ${totalCompleted} of ${finds.length} stops completed`}>
         <div
