@@ -1072,7 +1072,7 @@ export default function PlayPage() {
         <button
           onClick={() => setCurrentIndex(Math.max(0, currentIndex - 1))}
           disabled={currentIndex === 0}
-          className="rounded-md border border-gray-300 px-4 py-2 text-sm text-gray-700 hover:bg-gray-50 disabled:opacity-30"
+          className="rounded-lg border border-gray-300 px-4 py-2.5 text-sm text-gray-700 hover:bg-gray-50 disabled:opacity-30 min-h-[44px]"
         >
           Previous
         </button>
@@ -1081,14 +1081,14 @@ export default function PlayPage() {
           isLastFind ? (
             <button
               onClick={handleFinishHunt}
-              className="bg-brand text-white rounded-lg hover:bg-brand-dark transition-colors px-6 py-2 text-sm font-medium"
+              className="bg-brand text-white rounded-lg hover:bg-brand-dark transition-colors px-6 py-2.5 text-sm font-medium min-h-[44px]"
             >
               Finish Hunt
             </button>
           ) : (
             <button
               onClick={handleNextFind}
-              className="bg-brand text-white rounded-lg hover:bg-brand-dark transition-colors px-6 py-2 text-sm font-medium"
+              className="bg-brand text-white rounded-lg hover:bg-brand-dark transition-colors px-6 py-2.5 text-sm font-medium min-h-[44px]"
             >
               Next Stop
             </button>
