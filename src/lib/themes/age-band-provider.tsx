@@ -1,6 +1,7 @@
 "use client";
 
 import { createContext, useContext, useEffect, useState } from "react";
+import { MotionConfig } from "framer-motion";
 import { type AgeBand, THEME_TOKENS, tokensToCssVars } from "./tokens";
 
 const VALID_BANDS: AgeBand[] = ["primary", "intermediate", "teen", "adult"];
@@ -53,7 +54,10 @@ export function AgeBandProvider({
 
   return (
     <AgeBandContext.Provider value={{ band, setBand }}>
-      {children}
+      {/* reducedMotion="user" makes every framer-motion animation honor the OS
+          prefers-reduced-motion setting (opacity-only, no transforms). Combined
+          with the global CSS guard + confetti gating, this completes C4. */}
+      <MotionConfig reducedMotion="user">{children}</MotionConfig>
     </AgeBandContext.Provider>
   );
 }
