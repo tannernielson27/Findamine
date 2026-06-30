@@ -44,7 +44,7 @@ export default async function AppLayout({ children }: { children: React.ReactNod
   return (
     <AgeBandProvider initialBand={ageBand}>
       <Navbar user={profile} />
-      {profile && <Onboarding />}
+      {profile && <Onboarding role={profile.role} />}
       {children}
     </AgeBandProvider>
   );

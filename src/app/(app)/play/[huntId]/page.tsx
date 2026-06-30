@@ -122,6 +122,14 @@ export default function PlayPage() {
         const startData = await startRes.json();
         setFinds(findsData.finds || []);
 
+        // Mark the onboarding "first hunt" milestone (fire-and-forget). Drives
+        // the next-steps funnel surfaced after onboarding; never blocks play.
+        fetch("/api/v1/onboarding", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ milestone_type: "first_hunt_started" }),
+        }).catch(() => {});
+
         // Fetch hunt metadata for anxiety-sensitive mode and scoring config
         try {
           const huntRes = await safeFetch(`/api/v1/hunts/${huntId}`);
