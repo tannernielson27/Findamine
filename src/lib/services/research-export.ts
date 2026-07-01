@@ -19,6 +19,26 @@ function inc(map: Map<string, number>, key: string, by = 1) {
   map.set(key, (map.get(key) || 0) + by);
 }
 
+/** Anonymized, sequential participant id (never derived from PII). */
+export function participantId(index: number): string {
+  return `P${String(index + 1).padStart(4, "0")}`;
+}
+
+/** Escape one CSV/TSV field: quote when it contains the separator, a quote, or a newline. */
+export function escapeField(value: string, separator: string): string {
+  return value.includes(separator) || value.includes('"') || value.includes("\n")
+    ? `"${value.replace(/"/g, '""')}"`
+    : value;
+}
+
+/** Serialize a header + rows into a CSV/TSV string. Pure + testable. */
+export function serializeTable(headers: string[], rows: string[][], separator: string): string {
+  return [
+    headers.join(separator),
+    ...rows.map((r) => r.map((v) => escapeField(v, separator)).join(separator)),
+  ].join("\n");
+}
+
 export async function generateResearchExport(config: ExportConfig): Promise<string> {
   const supabase = await createSupabaseServiceClient();
 
@@ -173,7 +193,7 @@ export async function generateResearchExport(config: ExportConfig): Promise<stri
     const userId = userIds[i];
     const user = users?.find((u) => u.id === userId);
     const enrollment = enrollments.find((e) => e.user_id === userId);
-    const participantId = `P${String(i + 1).padStart(4, "0")}`;
+    const pid = participantId(i);
 
     const userAssignments = (assignments || []).filter((a) => a.user_id === userId);
     const treatmentValues = Array.from(dimensionNames).map((dimName) => {
@@ -192,7 +212,7 @@ export async function generateResearchExport(config: ExportConfig): Promise<stri
     }
 
     rows.push([
-      participantId,
+      pid,
       user?.age_band || "",
       user?.role || "",
       enrollment?.enrolled_at || "",
@@ -213,10 +233,5 @@ export async function generateResearchExport(config: ExportConfig): Promise<stri
     ]);
   }
 
-  const escape = (v: string) =>
-    v.includes(separator) || v.includes('"') || v.includes("\n")
-      ? `"${v.replace(/"/g, '""')}"`
-      : v;
-
-  return [headers.join(separator), ...rows.map((r) => r.map(escape).join(separator))].join("\n");
+  return serializeTable(headers, rows, separator);
 }
