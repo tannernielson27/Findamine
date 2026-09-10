@@ -1,6 +1,14 @@
 import { NextRequest } from "next/server";
 import { createSupabaseServiceClient } from "@/lib/supabase/server";
 import { getAuthUser, errorResponse, ApiError } from "@/lib/utils/api-auth";
+import { filterProfileForViewer, type ViewerRelationship } from "@/lib/utils/privacy";
+import { getViewerRelationships } from "@/lib/utils/viewer";
+
+interface TeamMemberRow {
+  user_id: string;
+  users?: { id: string; display_name: string | null; avatar_url: string | null; role?: string; profile_visibility?: Record<string, string> } | null;
+  [k: string]: unknown;
+}
 
 export async function GET(
   request: NextRequest,
@@ -15,7 +23,7 @@ export async function GET(
 
     const { data, error } = await supabase
       .from("teams")
-      .select("*, team_members(*, users(id, display_name, avatar_url, role))")
+      .select("*, team_members(*, users(id, display_name, avatar_url, role, profile_visibility))")
       .eq("id", id)
       .single();
 
@@ -23,7 +31,8 @@ export async function GET(
 
     // Admins/researchers can view any team; others must be a member or
     // the creator of the hunt this team belongs to
-    if (!["admin", "researcher"].includes(user.role)) {
+    const isStaff = ["admin", "researcher"].includes(user.role);
+    if (!isStaff) {
       const isMember = data.team_members?.some(
         (m: { user_id: string }) => m.user_id === user.id
       );
@@ -38,6 +47,17 @@ export async function GET(
           throw new ApiError(403, "Not authorized to view this team");
         }
       }
+
+      // Enforce each member's display_name/avatar visibility for this viewer
+      // (a teammate who set them to "nobody" must stay hidden). Staff see raw.
+      const members = (data.team_members || []) as TeamMemberRow[];
+      const rels = await getViewerRelationships(user.id, members.map((m) => m.user_id));
+      data.team_members = members.map((m) => {
+        const u = m.users;
+        if (!u?.id) return m;
+        const rel: ViewerRelationship = u.id === user.id ? "self" : rels.get(u.id) ?? "public";
+        return { ...m, users: { id: u.id, role: u.role, ...filterProfileForViewer(u, rel) } };
+      });
     }
 
     return Response.json({ team: data });

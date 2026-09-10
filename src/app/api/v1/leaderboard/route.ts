@@ -2,8 +2,7 @@ import { NextRequest } from "next/server";
 import { createSupabaseServiceClient } from "@/lib/supabase/server";
 import { getAuthUser, errorResponse, ApiError } from "@/lib/utils/api-auth";
 import { generalLimiter } from "@/lib/utils/rate-limit";
-import { canViewField } from "@/lib/utils/privacy";
-import { getViewerRelationships } from "@/lib/utils/viewer";
+import { resolveLeaderboardVisibility } from "@/lib/utils/leaderboard-visibility";
 
 // Roles whose names are never shown publicly on leaderboards
 const PROTECTED_ROLES = ["child", "teen"];
@@ -92,18 +91,20 @@ export async function GET(request: NextRequest) {
         .order("total_score", { ascending: false })
         .limit(limit);
 
-      // In real_name mode, respect each player's display_name visibility: if the
-      // viewer isn't permitted to see the name, redact it (keep them on the board).
-      let relMap = new Map<string, "self" | "team" | "class" | "public">();
-      if (identityMode === "real_name" && !isHuntOwner) {
-        const targetIds = (data || []).map((r) => r.user_id as string);
-        relMap = currentUser
-          ? await getViewerRelationships(currentUser.id, targetIds)
-          : new Map(targetIds.map((id) => [id, "public" as const]));
-      }
+      // Enforce privacy on the two fields a leaderboard exposes: total_score
+      // (restricted → the user is omitted from boards others see) and
+      // display_name (restricted → redacted, falling back to codename in
+      // real_name mode). Hunt owners/admins see the full board.
+      const vis = isHuntOwner
+        ? { drop: new Set<string>(), nameAllowed: new Map<string, boolean>() }
+        : await resolveLeaderboardVisibility(
+            currentUser?.id ?? null,
+            (data || []).map((r) => r.user_id as string)
+          );
 
-      const entries = (data || []).map(
-        (row: Record<string, unknown>) => {
+      const entries = (data || [])
+        .filter((row) => isHuntOwner || !vis.drop.has(row.user_id as string))
+        .map((row: Record<string, unknown>) => {
           // Supabase returns joined users as array or object depending on relation type
           const rawUsers = row.users;
           const user: LeaderboardUser | null = Array.isArray(rawUsers)
@@ -112,11 +113,10 @@ export async function GET(request: NextRequest) {
 
           const codename = row.codename as string | null;
 
-          // Hide the name when the viewer lacks display_name permission.
-          const rel = relMap.get(row.user_id as string) ?? "public";
           const nameAllowed =
             identityMode !== "real_name" ||
-            canViewField(user?.profile_visibility, rel, "display_name");
+            isHuntOwner ||
+            (vis.nameAllowed.get(row.user_id as string) ?? false);
           const effectiveMode = nameAllowed ? identityMode : "codename_assigned";
 
           const identity = isHuntOwner
@@ -132,8 +132,7 @@ export async function GET(request: NextRequest) {
             score: row.total_score as number,
             ...identity,
           };
-        }
-      );
+        });
 
       // Viewer's own standing — precise even when outside the visible top-N.
       // Self data, so no name-redaction applies. Motivation surface (B5).
@@ -181,40 +180,49 @@ export async function GET(request: NextRequest) {
       });
     }
 
-    // Overall leaderboard: aggregated per user via RPC, always protect children
+    // Overall leaderboard: aggregated per user via RPC, always protect children.
     const { data } = await supabase.rpc("overall_leaderboard", {
       p_limit: limit,
     });
 
-    const entries = (data || []).map(
-      (row: {
-        user_id: string;
-        total_score: number;
-        hunts_completed: number;
-        display_name: string | null;
-        avatar_url: string | null;
-        role: string;
-        best_codename: string | null;
-      }) => {
-        const user: LeaderboardUser = {
-          id: row.user_id,
-          display_name: row.display_name,
-          avatar_url: row.avatar_url,
-          role: row.role,
-        };
-        const identity = redactEntry(
-          user,
-          row.best_codename,
-          "codename_assigned"
-        );
-        return {
-          user_id: row.user_id,
-          score: row.total_score,
-          hunts_completed: row.hunts_completed,
-          ...identity,
-        };
-      }
+    // Omit users who restricted total_score from viewers who can't see it.
+    // (Names here are already codenames/initials via redactEntry.)
+    const overallVis = await resolveLeaderboardVisibility(
+      currentUser?.id ?? null,
+      (data || []).map((r: { user_id: string }) => r.user_id)
     );
+
+    const entries = (data || [])
+      .filter((row: { user_id: string }) => !overallVis.drop.has(row.user_id))
+      .map(
+        (row: {
+          user_id: string;
+          total_score: number;
+          hunts_completed: number;
+          display_name: string | null;
+          avatar_url: string | null;
+          role: string;
+          best_codename: string | null;
+        }) => {
+          const user: LeaderboardUser = {
+            id: row.user_id,
+            display_name: row.display_name,
+            avatar_url: row.avatar_url,
+            role: row.role,
+          };
+          const identity = redactEntry(
+            user,
+            row.best_codename,
+            "codename_assigned"
+          );
+          return {
+            user_id: row.user_id,
+            score: row.total_score,
+            hunts_completed: row.hunts_completed,
+            ...identity,
+          };
+        }
+      );
 
     return Response.json({
       entries,
