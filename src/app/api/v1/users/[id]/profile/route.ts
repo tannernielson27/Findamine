@@ -9,6 +9,7 @@ import {
   type ViewerRelationship,
 } from "@/lib/utils/privacy";
 import { getViewerRelationship, getViewerRelationships } from "@/lib/utils/viewer";
+import { sumLedger } from "@/lib/utils/points";
 
 interface FriendRow {
   requester_id: string;
@@ -75,7 +76,7 @@ export async function GET(
             .order("earned_at", { ascending: false })
         : Promise.resolve({ data: null }),
       allowed.has("total_score")
-        ? supabase.from("points_ledger").select("points").eq("user_id", target.id)
+        ? supabase.from("points_ledger").select("amount").eq("user_id", target.id)
         : Promise.resolve({ data: null }),
       allowed.has("hunt_history")
         ? supabase
@@ -127,7 +128,7 @@ export async function GET(
       real_name: typeof meta.real_name === "string" ? meta.real_name : null,
       personality_scores: Object.keys(personalityScores).length > 0 ? personalityScores : null,
       badges: badges.data || null,
-      total_score: points.data ? points.data.reduce((sum, p) => sum + (p.points || 0), 0) : null,
+      total_score: points.data ? sumLedger(points.data) : null,
       hunt_history: sessions.data || null,
       friends_list: friendsList,
     };

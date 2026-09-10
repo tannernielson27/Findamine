@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { createSupabaseBrowserClient } from "@/lib/supabase/client";
 import { Trophy } from "lucide-react";
 import {
@@ -28,6 +28,7 @@ export default function Leaderboard({ huntId }: LeaderboardProps) {
   const [identityMode, setIdentityMode] = useState("codename_assigned");
   const [viewerId, setViewerId] = useState<string | null>(null);
   const [serverMe, setServerMe] = useState<ServerMe | null>(null);
+  const refetchTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   async function fetchLeaderboard() {
     const params = huntId ? `?hunt_id=${huntId}` : "";
@@ -62,13 +63,23 @@ export default function Leaderboard({ huntId }: LeaderboardProps) {
         },
         (payload) => {
           if (payload.new.status === "completed" || payload.new.total_score !== payload.old?.total_score) {
-            fetchLeaderboard();
+            if (refetchTimer.current) clearTimeout(refetchTimer.current);
+            refetchTimer.current = setTimeout(() => {
+              refetchTimer.current = null;
+              fetchLeaderboard();
+            }, 3000);
           }
         }
       )
       .subscribe();
 
-    return () => { supabase.removeChannel(channel); };
+    return () => {
+      supabase.removeChannel(channel);
+      if (refetchTimer.current) {
+        clearTimeout(refetchTimer.current);
+        refetchTimer.current = null;
+      }
+    };
   }, [huntId]);
 
   const medals = ["🥇", "🥈", "🥉"];
