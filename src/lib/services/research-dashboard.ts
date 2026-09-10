@@ -30,6 +30,18 @@ export interface StudyHealth {
     minion_links: number;
     referral_points_total: number;
   };
+  /** Delivery→submission funnel per survey timepoint (T1/T2/T3). */
+  surveys: SurveyFunnelRow[];
+}
+
+export interface SurveyFunnelRow {
+  timepoint: string;
+  survey_title: string;
+  survey_status: string;
+  delivered: number;
+  opened: number;
+  submitted: number;
+  expired: number;
 }
 
 export async function getStudyHealth(studyId: string): Promise<StudyHealth> {
@@ -94,6 +106,58 @@ export async function getStudyHealth(studyId: string): Promise<StudyHealth> {
     referralPointsTotal = (refPoints || []).reduce((s, r) => s + (r.amount || 0), 0);
   }
 
+  // Survey delivery/submission funnel per timepoint — one of the four pilot
+  // validation checks (prospectus §7c: survey timing/delivery).
+  const surveys: SurveyFunnelRow[] = [];
+  const { data: schedules } = await supabase
+    .from("survey_schedules")
+    .select("survey_id, trigger_config, surveys(title, status)")
+    .eq("trigger_type", "time");
+  const scheduleRows = (schedules || [])
+    .map((s) => {
+      const cfg = (s.trigger_config || {}) as { timepoint?: string; offset_days?: number };
+      const survey = s.surveys as unknown as { title: string; status: string } | null;
+      return {
+        surveyId: s.survey_id,
+        timepoint: cfg.timepoint || (cfg.offset_days !== undefined ? `d${cfg.offset_days}` : "?"),
+        title: survey?.title || "",
+        status: survey?.status || "",
+      };
+    })
+    .sort((a, b) => a.timepoint.localeCompare(b.timepoint));
+
+  if (scheduleRows.length > 0 && userIds.length > 0) {
+    const { data: deliveries } = await supabase
+      .from("survey_deliveries")
+      .select("survey_id, status")
+      .in("user_id", userIds)
+      .in("survey_id", scheduleRows.map((r) => r.surveyId));
+    for (const row of scheduleRows) {
+      const mine = (deliveries || []).filter((d) => d.survey_id === row.surveyId);
+      surveys.push({
+        timepoint: row.timepoint,
+        survey_title: row.title,
+        survey_status: row.status,
+        delivered: mine.length,
+        opened: mine.filter((d) => d.status === "opened" || d.status === "submitted").length,
+        submitted: mine.filter((d) => d.status === "submitted").length,
+        expired: mine.filter((d) => d.status === "expired").length,
+      });
+    }
+  } else {
+    for (const row of scheduleRows) {
+      surveys.push({
+        timepoint: row.timepoint,
+        survey_title: row.title,
+        survey_status: row.status,
+        delivered: 0,
+        opened: 0,
+        submitted: 0,
+        expired: 0,
+      });
+    }
+  }
+
   return {
     study: study || null,
     balance,
@@ -108,6 +172,7 @@ export async function getStudyHealth(studyId: string): Promise<StudyHealth> {
       minion_links: minionLinks,
       referral_points_total: referralPointsTotal,
     },
+    surveys,
   };
 }
 

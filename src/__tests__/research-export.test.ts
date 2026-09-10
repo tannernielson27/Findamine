@@ -1,5 +1,59 @@
 import { describe, it, expect } from "vitest";
-import { participantId, escapeField, serializeTable } from "@/lib/services/research-export";
+import {
+  participantId,
+  escapeField,
+  serializeTable,
+  tableToJSON,
+  serialize,
+  countReversals,
+} from "@/lib/services/research-export";
+
+describe("countReversals (change-then-undo across saves)", () => {
+  it("returns 0 with no changes or no undo", () => {
+    expect(countReversals([])).toBe(0);
+    expect(countReversals([[{ field: "total_score", from: "everyone", to: "nobody" }]])).toBe(0);
+    expect(
+      countReversals([
+        [{ field: "total_score", from: "everyone", to: "team" }],
+        [{ field: "total_score", from: "team", to: "nobody" }], // further, not undone
+      ])
+    ).toBe(0);
+  });
+
+  it("counts an exact undo of a prior transition", () => {
+    expect(
+      countReversals([
+        [{ field: "total_score", from: "everyone", to: "nobody" }],
+        [{ field: "total_score", from: "nobody", to: "everyone" }],
+      ])
+    ).toBe(1);
+  });
+
+  it("tracks reversals per field independently", () => {
+    expect(
+      countReversals([
+        [
+          { field: "total_score", from: "everyone", to: "nobody" },
+          { field: "badges", from: "everyone", to: "team" },
+        ],
+        [
+          { field: "total_score", from: "nobody", to: "everyone" }, // undo
+          { field: "badges", from: "team", to: "nobody" }, // further
+        ],
+      ])
+    ).toBe(1);
+  });
+
+  it("counts repeated flip-flops each time", () => {
+    expect(
+      countReversals([
+        [{ field: "real_name", from: "class", to: "nobody" }],
+        [{ field: "real_name", from: "nobody", to: "class" }], // undo #1
+        [{ field: "real_name", from: "class", to: "nobody" }], // undo of the undo
+      ])
+    ).toBe(2);
+  });
+});
 
 describe("participantId", () => {
   it("produces zero-padded, 1-based, de-identified ids", () => {
@@ -50,5 +104,35 @@ describe("serializeTable", () => {
 
   it("handles an empty row set (header only)", () => {
     expect(serializeTable(["a", "b"], [], ",")).toBe("a,b");
+  });
+});
+
+describe("tableToJSON", () => {
+  it("maps each row to an object keyed by header", () => {
+    const out = tableToJSON(["a", "b"], [["1", "2"], ["3", "4"]]);
+    expect(JSON.parse(out)).toEqual([
+      { a: "1", b: "2" },
+      { a: "3", b: "4" },
+    ]);
+  });
+
+  it("fills missing cells with empty strings", () => {
+    const out = tableToJSON(["a", "b", "c"], [["1", "2"]]);
+    expect(JSON.parse(out)).toEqual([{ a: "1", b: "2", c: "" }]);
+  });
+
+  it("produces an empty array for no rows", () => {
+    expect(JSON.parse(tableToJSON(["a"], []))).toEqual([]);
+  });
+});
+
+describe("serialize", () => {
+  const headers = ["a", "b"];
+  const rows = [["1", "2"]];
+
+  it("dispatches to CSV / TSV / JSON by format", () => {
+    expect(serialize(headers, rows, "csv")).toBe("a,b\n1,2");
+    expect(serialize(headers, rows, "tsv")).toBe("a\tb\n1\t2");
+    expect(JSON.parse(serialize(headers, rows, "json"))).toEqual([{ a: "1", b: "2" }]);
   });
 });

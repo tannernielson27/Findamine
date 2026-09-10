@@ -1,6 +1,13 @@
 import { NextRequest } from "next/server";
 import { getAuthUser, requireRole, errorResponse, ApiError } from "@/lib/utils/api-auth";
-import { generateResearchExport } from "@/lib/services/research-export";
+import {
+  generateResearchExport,
+  generateTrajectoryExport,
+  generateEventsExport,
+  type ExportFormat,
+} from "@/lib/services/research-export";
+
+const FORMATS: ExportFormat[] = ["csv", "tsv", "json"];
 
 export async function GET(request: NextRequest) {
   try {
@@ -9,23 +16,36 @@ export async function GET(request: NextRequest) {
 
     const { searchParams } = new URL(request.url);
     const studyId = searchParams.get("study_id");
-    const format = (searchParams.get("format") || "csv") as "csv" | "tsv";
+    const format = (searchParams.get("format") || "csv") as ExportFormat;
+    // "participants" (one row per participant), "trajectory" (one row per
+    // privacy-index snapshot), or "events" (one row per raw privacy_event —
+    // for survival models and flow-level friction funnels).
+    const dataset = searchParams.get("dataset") || "participants";
 
     if (!studyId) throw new ApiError(400, "study_id required");
+    if (!FORMATS.includes(format)) throw new ApiError(400, `format must be one of: ${FORMATS.join(", ")}`);
 
-    const csvContent = await generateResearchExport({
-      studyId,
-      format,
-    });
+    const content =
+      dataset === "trajectory"
+        ? await generateTrajectoryExport({ studyId, format })
+        : dataset === "events"
+          ? await generateEventsExport({ studyId, format })
+          : await generateResearchExport({ studyId, format });
 
-    if (!csvContent) {
-      throw new ApiError(404, "No participants found for this study");
+    if (!content) {
+      throw new ApiError(404, "No data found for this study");
     }
 
-    const contentType = format === "tsv" ? "text/tab-separated-values" : "text/csv";
-    const filename = `study_${studyId}_export.${format}`;
+    const contentType =
+      format === "json"
+        ? "application/json"
+        : format === "tsv"
+          ? "text/tab-separated-values"
+          : "text/csv";
+    const ext = format === "json" ? "json" : format;
+    const filename = `study_${studyId}_${dataset}.${ext}`;
 
-    return new Response(csvContent, {
+    return new Response(content, {
       headers: {
         "Content-Type": contentType,
         "Content-Disposition": `attachment; filename="${filename}"`,

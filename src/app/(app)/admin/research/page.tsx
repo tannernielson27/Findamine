@@ -83,6 +83,50 @@ export default async function ResearchPage() {
             </div>
           </section>
 
+          {/* Survey delivery/submission funnel (pilot validation check c) */}
+          <section className="mb-8">
+            <h2 className="text-sm font-semibold text-gray-900 mb-2">Survey funnel</h2>
+            {health.surveys.length === 0 ? (
+              <p className="text-sm text-gray-500">No time-scheduled surveys found (seed migrations 047/051).</p>
+            ) : (
+              <div className="rounded-lg border border-gray-200 overflow-hidden">
+                <table className="w-full text-sm">
+                  <thead className="bg-gray-50 text-gray-500 text-left">
+                    <tr>
+                      <th className="px-3 py-2 font-medium">Timepoint</th>
+                      <th className="px-3 py-2 font-medium">Survey</th>
+                      <th className="px-3 py-2 font-medium">Status</th>
+                      <th className="px-3 py-2 font-medium text-right">Delivered</th>
+                      <th className="px-3 py-2 font-medium text-right">Opened</th>
+                      <th className="px-3 py-2 font-medium text-right">Submitted</th>
+                      <th className="px-3 py-2 font-medium text-right">Expired</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {health.surveys.map((s, i) => (
+                      <tr key={i} className="border-t border-gray-100">
+                        <td className="px-3 py-2 font-medium text-gray-900">{s.timepoint}</td>
+                        <td className="px-3 py-2 text-gray-700">{s.survey_title}</td>
+                        <td className="px-3 py-2">
+                          <span className={s.survey_status === "active" ? "text-green-600" : "text-amber-600"}>
+                            {s.survey_status}
+                            {s.survey_status !== "active" && " (not delivering)"}
+                          </span>
+                        </td>
+                        <td className="px-3 py-2 text-right text-gray-900">{s.delivered}</td>
+                        <td className="px-3 py-2 text-right text-gray-900">{s.opened}</td>
+                        <td className="px-3 py-2 text-right text-gray-900">
+                          {s.submitted} <span className="text-gray-400">({pct(s.submitted, s.delivered)})</span>
+                        </td>
+                        <td className="px-3 py-2 text-right text-gray-500">{s.expired}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </section>
+
           {/* Referral mechanic */}
           <section className="mb-8">
             <h2 className="text-sm font-semibold text-gray-900 mb-2">Referral economy</h2>
@@ -94,7 +138,7 @@ export default async function ResearchPage() {
           </section>
 
           <p className="text-xs text-gray-400">
-            Validation checklist: balanced cells, &gt;0 events per participant, snapshots present, referral links flowing.
+            Validation checklist: balanced cells, &gt;0 events per participant, snapshots present, surveys delivering, referral links flowing.
           </p>
         </>
       )}

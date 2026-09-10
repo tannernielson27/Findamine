@@ -8,15 +8,41 @@
  */
 
 import { createSupabaseServiceClient } from "@/lib/supabase/server";
+import { scoreAnswers, type ScorableQuestion } from "@/lib/services/survey-scoring";
+
+export type ExportFormat = "csv" | "tsv" | "json";
 
 export interface ExportConfig {
   studyId: string;
-  format: "csv" | "tsv";
-  includeRawEvents?: boolean;
+  format: ExportFormat;
 }
 
 function inc(map: Map<string, number>, key: string, by = 1) {
   map.set(key, (map.get(key) || 0) + by);
+}
+
+interface ExportFieldDelta {
+  field: string;
+  from: string | null;
+  to: string | null;
+}
+
+/**
+ * Count cross-save decision reversals in a participant's ordered sequence of
+ * privacy_change delta lists: a change that returns a field to the exact value
+ * a previous change moved it away from (a→b … b→a). Pure + testable.
+ */
+export function countReversals(changeDeltas: ExportFieldDelta[][]): number {
+  const lastTransition = new Map<string, { from: string | null; to: string | null }>();
+  let reversals = 0;
+  for (const deltas of changeDeltas) {
+    for (const d of deltas) {
+      const prev = lastTransition.get(d.field);
+      if (prev && prev.to === d.from && prev.from === d.to) reversals++;
+      lastTransition.set(d.field, { from: d.from, to: d.to });
+    }
+  }
+  return reversals;
 }
 
 /** Anonymized, sequential participant id (never derived from PII). */
@@ -37,6 +63,19 @@ export function serializeTable(headers: string[], rows: string[][], separator: s
     headers.join(separator),
     ...rows.map((r) => r.map((v) => escapeField(v, separator)).join(separator)),
   ].join("\n");
+}
+
+/** Serialize a header + rows into a JSON array of objects (one per row). Pure. */
+export function tableToJSON(headers: string[], rows: string[][]): string {
+  return JSON.stringify(
+    rows.map((r) => Object.fromEntries(headers.map((h, i) => [h, r[i] ?? ""]))),
+  );
+}
+
+/** Serialize a table in the requested format. */
+export function serialize(headers: string[], rows: string[][], format: ExportFormat): string {
+  if (format === "json") return tableToJSON(headers, rows);
+  return serializeTable(headers, rows, format === "tsv" ? "\t" : ",");
 }
 
 export async function generateResearchExport(config: ExportConfig): Promise<string> {
@@ -132,13 +171,17 @@ export async function generateResearchExport(config: ExportConfig): Promise<stri
     finalAt.set(s.user_id, s.created_at);
   }
 
-  // Privacy events → change/tighten/loosen/abandon counts + first change time.
+  // Privacy events → change/tighten/loosen/abandon/view/touch counts,
+  // first change time, and cross-save reversal reconstruction.
   const changeCount = new Map<string, number>();
   const tightenCount = new Map<string, number>();
   const loosenCount = new Map<string, number>();
   const abandonCount = new Map<string, number>();
+  const viewCount = new Map<string, number>();
+  const fieldTouchCount = new Map<string, number>();
   const firstChangeAt = new Map<string, string>();
   const totalEvents = new Map<string, number>();
+  const changeDeltasByUser = new Map<string, ExportFieldDelta[][]>();
   const { data: pEvents } = await supabase
     .from("privacy_events")
     .select("user_id, event_type, metadata, created_at")
@@ -149,12 +192,101 @@ export async function generateResearchExport(config: ExportConfig): Promise<stri
     if (e.event_type === "privacy_change") {
       inc(changeCount, e.user_id);
       if (!firstChangeAt.has(e.user_id)) firstChangeAt.set(e.user_id, e.created_at);
-      const dir = (e.metadata as { direction?: string } | null)?.direction;
-      if (dir === "tighten") inc(tightenCount, e.user_id);
-      else if (dir === "loosen") inc(loosenCount, e.user_id);
+      const meta = e.metadata as { direction?: string; deltas?: ExportFieldDelta[] } | null;
+      if (meta?.direction === "tighten") inc(tightenCount, e.user_id);
+      else if (meta?.direction === "loosen") inc(loosenCount, e.user_id);
+      if (Array.isArray(meta?.deltas)) {
+        if (!changeDeltasByUser.has(e.user_id)) changeDeltasByUser.set(e.user_id, []);
+        changeDeltasByUser.get(e.user_id)!.push(meta.deltas);
+      }
     } else if (e.event_type === "privacy_abandon") {
       inc(abandonCount, e.user_id);
+    } else if (e.event_type === "privacy_view") {
+      inc(viewCount, e.user_id);
+    } else if (e.event_type === "privacy_field_touch") {
+      inc(fieldTouchCount, e.user_id);
     }
+  }
+
+  // ── Survey scores per timepoint (T1/T2/T3) ──────────────────────
+  // Map each scheduled survey to its timepoint label, score each participant's
+  // submitted response by subscale, and expose a status per timepoint.
+  const surveyTimepoint = new Map<string, string>();
+  const { data: schedules } = await supabase
+    .from("survey_schedules")
+    .select("survey_id, trigger_config")
+    .eq("trigger_type", "time");
+  for (const s of schedules || []) {
+    const cfg = (s.trigger_config || {}) as { timepoint?: string; offset_days?: number };
+    const tp = cfg.timepoint || (cfg.offset_days !== undefined ? `d${cfg.offset_days}` : "survey");
+    surveyTimepoint.set(s.survey_id, tp);
+  }
+  const surveyIds = [...surveyTimepoint.keys()];
+
+  const questionsBySurvey = new Map<string, ScorableQuestion[]>();
+  const subscalesByTp = new Map<string, Set<string>>();
+  const statusByUserTp = new Map<string, Map<string, string>>(); // user → tp → status
+  const scoreByUserTp = new Map<string, Map<string, number>>(); // user → `${tp}::${subscale}` → score
+
+  if (surveyIds.length > 0) {
+    const { data: questions } = await supabase
+      .from("survey_questions")
+      .select("survey_id, item_code, question_type, scale_config, reverse_coded, subscale, sort_order")
+      .in("survey_id", surveyIds);
+    for (const q of questions || []) {
+      if (!questionsBySurvey.has(q.survey_id)) questionsBySurvey.set(q.survey_id, []);
+      questionsBySurvey.get(q.survey_id)!.push(q as ScorableQuestion);
+      const tp = surveyTimepoint.get(q.survey_id)!;
+      if (q.subscale) {
+        if (!subscalesByTp.has(tp)) subscalesByTp.set(tp, new Set());
+        subscalesByTp.get(tp)!.add(q.subscale);
+      }
+    }
+
+    // Delivery status per (user, timepoint): prefer the most-complete state.
+    const statusRank: Record<string, number> = { submitted: 4, opened: 3, expired: 2, pending: 1 };
+    const { data: deliveries } = await supabase
+      .from("survey_deliveries")
+      .select("survey_id, user_id, status")
+      .in("user_id", userIds)
+      .in("survey_id", surveyIds);
+    for (const d of deliveries || []) {
+      const tp = surveyTimepoint.get(d.survey_id);
+      if (!tp) continue;
+      if (!statusByUserTp.has(d.user_id)) statusByUserTp.set(d.user_id, new Map());
+      const cur = statusByUserTp.get(d.user_id)!.get(tp);
+      if (!cur || (statusRank[d.status] || 0) > (statusRank[cur] || 0)) {
+        statusByUserTp.get(d.user_id)!.set(tp, d.status);
+      }
+    }
+
+    // Latest response per (user, survey) → score by subscale.
+    const latestAnswers = new Map<string, Record<string, number | string>>(); // `${user}::${survey}`
+    const { data: responses } = await supabase
+      .from("survey_responses")
+      .select("survey_id, user_id, answers, created_at")
+      .in("user_id", userIds)
+      .in("survey_id", surveyIds)
+      .order("created_at", { ascending: true });
+    for (const r of responses || []) {
+      latestAnswers.set(`${r.user_id}::${r.survey_id}`, (r.answers || {}) as Record<string, number | string>);
+    }
+    for (const [key, answers] of latestAnswers) {
+      const [uid, surveyId] = key.split("::");
+      const qs = questionsBySurvey.get(surveyId);
+      const tp = surveyTimepoint.get(surveyId);
+      if (!qs || !tp) continue;
+      if (!scoreByUserTp.has(uid)) scoreByUserTp.set(uid, new Map());
+      for (const sub of scoreAnswers(qs, answers)) {
+        scoreByUserTp.get(uid)!.set(`${tp}::${sub.subscale}`, sub.score);
+      }
+    }
+  }
+
+  const timepoints = [...new Set(surveyTimepoint.values())].sort();
+  const sortedSubscalesByTp = new Map<string, string[]>();
+  for (const tp of timepoints) {
+    sortedSubscalesByTp.set(tp, [...(subscalesByTp.get(tp) || [])].sort());
   }
 
   // Treatment dimension names for headers.
@@ -163,9 +295,15 @@ export async function generateResearchExport(config: ExportConfig): Promise<stri
     dimensionNames.add((a.treatment_dimensions as unknown as { name: string }).name);
   }
 
-  const separator = config.format === "tsv" ? "\t" : ",";
   const num = (n: number | undefined, dp = 0) =>
     n === undefined ? "" : dp > 0 ? n.toFixed(dp) : String(n);
+
+  // Survey columns: per timepoint, a status column + one column per subscale.
+  const surveyHeaders: string[] = [];
+  for (const tp of timepoints) {
+    surveyHeaders.push(`survey_${tp}_status`);
+    for (const sub of sortedSubscalesByTp.get(tp) || []) surveyHeaders.push(`survey_${tp}_${sub}`);
+  }
 
   const headers = [
     "participant_id",
@@ -184,8 +322,13 @@ export async function generateResearchExport(config: ExportConfig): Promise<stri
     "tighten_count",
     "loosen_count",
     "abandon_count",
+    "reversal_count",
+    "view_count",
+    "field_touch_count",
+    "successful_change_rate",
     "time_to_first_change_hours",
     "total_privacy_events",
+    ...surveyHeaders,
   ];
 
   const rows: string[][] = [];
@@ -211,6 +354,18 @@ export async function generateResearchExport(config: ExportConfig): Promise<stri
       if (Number.isFinite(hours) && hours >= 0) ttfc = hours.toFixed(2);
     }
 
+    // Per-timepoint survey status + subscale scores.
+    const uStatus = statusByUserTp.get(userId);
+    const uScore = scoreByUserTp.get(userId);
+    const surveyValues: string[] = [];
+    for (const tp of timepoints) {
+      surveyValues.push(uStatus?.get(tp) || "none");
+      for (const sub of sortedSubscalesByTp.get(tp) || []) {
+        const v = uScore?.get(`${tp}::${sub}`);
+        surveyValues.push(v === undefined ? "" : num(v, 2));
+      }
+    }
+
     rows.push([
       pid,
       user?.age_band || "",
@@ -228,10 +383,205 @@ export async function generateResearchExport(config: ExportConfig): Promise<stri
       num(tightenCount.get(userId) || 0),
       num(loosenCount.get(userId) || 0),
       num(abandonCount.get(userId) || 0),
+      num(countReversals(changeDeltasByUser.get(userId) || [])),
+      num(viewCount.get(userId) || 0),
+      num(fieldTouchCount.get(userId) || 0),
+      // Completed saves over initiated flows (completed + abandoned). Blank when
+      // the participant never initiated a change flow at all.
+      (() => {
+        const completed = changeCount.get(userId) || 0;
+        const initiated = completed + (abandonCount.get(userId) || 0);
+        return initiated > 0 ? (completed / initiated).toFixed(3) : "";
+      })(),
       ttfc,
       num(totalEvents.get(userId) || 0),
+      ...surveyValues,
     ]);
   }
 
-  return serializeTable(headers, rows, separator);
+  return serialize(headers, rows, config.format);
+}
+
+/**
+ * Long-format privacy-index trajectory export: one row per snapshot, keyed to the
+ * same anonymized participant ids as the participant-level export. Includes the
+ * snapshot source, the neutral `unset` flag, and denormalized condition — the
+ * shape growth-model / fatigue-over-time analyses (H4/H5) want.
+ */
+export async function generateTrajectoryExport(config: ExportConfig): Promise<string> {
+  const supabase = await createSupabaseServiceClient();
+
+  const { data: enrollments } = await supabase
+    .from("study_enrollments")
+    .select("user_id, enrolled_at")
+    .eq("study_id", config.studyId)
+    .is("withdrawn_at", null);
+
+  if (!enrollments || enrollments.length === 0) return "";
+
+  // Stable P#### ids matching the participant-level export (enrollment order).
+  const userIds = enrollments.map((e) => e.user_id);
+  const pidByUser = new Map<string, string>();
+  const enrolledAtByUser = new Map<string, string>();
+  userIds.forEach((uid, i) => pidByUser.set(uid, participantId(i)));
+  for (const e of enrollments) enrolledAtByUser.set(e.user_id, e.enrolled_at);
+
+  const { data: snapshots } = await supabase
+    .from("privacy_index_snapshots")
+    .select("user_id, index_value, source, unset, treatment, privacy_default, created_at")
+    .in("user_id", userIds)
+    .order("created_at", { ascending: true });
+
+  const frictionByUser = await loadFrictionAssignments(supabase, userIds);
+
+  const headers = [
+    "participant_id",
+    "snapshot_at",
+    "days_since_enrollment",
+    "index_value",
+    "source",
+    "unset",
+    "treatment",
+    "privacy_default",
+    "privacy_friction",
+  ];
+
+  const rows: string[][] = [];
+  for (const s of snapshots || []) {
+    const pid = pidByUser.get(s.user_id);
+    if (!pid) continue;
+    const enrolledAt = enrolledAtByUser.get(s.user_id);
+    let days = "";
+    if (enrolledAt) {
+      const d = (new Date(s.created_at).getTime() - new Date(enrolledAt).getTime()) / 86_400_000;
+      if (Number.isFinite(d) && d >= 0) days = d.toFixed(3);
+    }
+    rows.push([
+      pid,
+      s.created_at,
+      days,
+      Number(s.index_value).toFixed(4),
+      s.source ?? "",
+      s.unset ? "true" : "false",
+      (s.treatment as string) ?? "",
+      (s.privacy_default as string) ?? "",
+      frictionByUser.get(s.user_id) ?? "",
+    ]);
+  }
+
+  return serialize(headers, rows, config.format);
+}
+
+type ServiceClient = Awaited<ReturnType<typeof createSupabaseServiceClient>>;
+
+/** privacy_friction assignment per user (denormalized onto long-format rows). */
+async function loadFrictionAssignments(
+  supabase: ServiceClient,
+  userIds: string[]
+): Promise<Map<string, string>> {
+  const result = new Map<string, string>();
+  const { data } = await supabase
+    .from("dimension_assignments")
+    .select("user_id, level, treatment_dimensions(name)")
+    .in("user_id", userIds);
+  for (const a of data || []) {
+    const name = (a.treatment_dimensions as unknown as { name: string })?.name;
+    if (name === "privacy_friction") result.set(a.user_id, a.level);
+  }
+  return result;
+}
+
+/**
+ * Raw privacy-events long-format export: one row per privacy_event (view /
+ * field_touch / change / abandon), keyed to the same anonymized ids. This is
+ * the dataset for survival models (time-to-first-change), flow-level
+ * successful-change analysis, and step-by-step friction funnels.
+ */
+export async function generateEventsExport(config: ExportConfig): Promise<string> {
+  const supabase = await createSupabaseServiceClient();
+
+  const { data: enrollments } = await supabase
+    .from("study_enrollments")
+    .select("user_id, enrolled_at")
+    .eq("study_id", config.studyId)
+    .is("withdrawn_at", null);
+
+  if (!enrollments || enrollments.length === 0) return "";
+
+  const userIds = enrollments.map((e) => e.user_id);
+  const pidByUser = new Map<string, string>();
+  const enrolledAtByUser = new Map<string, string>();
+  userIds.forEach((uid, i) => pidByUser.set(uid, participantId(i)));
+  for (const e of enrollments) enrolledAtByUser.set(e.user_id, e.enrolled_at);
+
+  const frictionByUser = await loadFrictionAssignments(supabase, userIds);
+
+  const { data: events } = await supabase
+    .from("privacy_events")
+    .select(
+      "user_id, event_type, page, duration_ms, click_count, session_id, treatment, privacy_default, metadata, created_at"
+    )
+    .in("user_id", userIds)
+    .order("created_at", { ascending: true });
+
+  const headers = [
+    "participant_id",
+    "event_at",
+    "days_since_enrollment",
+    "event_type",
+    "page",
+    "direction",
+    "fields_changed",
+    "scope",
+    "reversed",
+    "index_before",
+    "index_after",
+    "duration_ms",
+    "click_count",
+    "session_id",
+    "treatment",
+    "privacy_default",
+    "privacy_friction",
+  ];
+
+  const rows: string[][] = [];
+  for (const e of events || []) {
+    const pid = pidByUser.get(e.user_id);
+    if (!pid) continue;
+    const enrolledAt = enrolledAtByUser.get(e.user_id);
+    let days = "";
+    if (enrolledAt) {
+      const d = (new Date(e.created_at).getTime() - new Date(enrolledAt).getTime()) / 86_400_000;
+      if (Number.isFinite(d) && d >= 0) days = d.toFixed(4);
+    }
+    const meta = (e.metadata || {}) as {
+      direction?: string;
+      deltas?: unknown[];
+      scope?: string;
+      reversed?: boolean;
+      index_before?: number;
+      index_after?: number;
+    };
+    rows.push([
+      pid,
+      e.created_at,
+      days,
+      e.event_type ?? "",
+      e.page ?? "",
+      meta.direction ?? "",
+      Array.isArray(meta.deltas) ? String(meta.deltas.length) : "",
+      meta.scope ?? "",
+      meta.reversed === undefined ? "" : String(meta.reversed),
+      meta.index_before === undefined ? "" : Number(meta.index_before).toFixed(4),
+      meta.index_after === undefined ? "" : Number(meta.index_after).toFixed(4),
+      e.duration_ms === null || e.duration_ms === undefined ? "" : String(e.duration_ms),
+      e.click_count === null || e.click_count === undefined ? "" : String(e.click_count),
+      e.session_id ?? "",
+      (e.treatment as string) ?? "",
+      (e.privacy_default as string) ?? "",
+      frictionByUser.get(e.user_id) ?? "",
+    ]);
+  }
+
+  return serialize(headers, rows, config.format);
 }
