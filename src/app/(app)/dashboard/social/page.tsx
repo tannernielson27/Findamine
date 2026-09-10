@@ -38,6 +38,8 @@ interface ReferralInfo {
   minions: ReferralPerson[];
   recruiter: ReferralPerson | null;
   recent_earnings: ReferralEarning[];
+  disclosure_eligible?: boolean;
+  forfeited_points?: number;
 }
 
 const GROUP_LABELS: Record<RecipientGroup, string> = {
@@ -259,6 +261,25 @@ export default function SocialPage() {
             )}
           </section>
 
+          {/* Disclosure gate — hidden profiles don't collect crew bonuses. The
+              cost of privacy is shown, not just applied (prospectus §3.2). */}
+          {referral && referral.disclosure_eligible === false && (
+            <section className="rounded-2xl border border-[var(--color-warning)]/40 bg-[var(--color-warning)]/10 p-4 mb-6">
+              <p className="text-sm font-medium text-themed-text mb-1">
+                Your crew bonuses are paused
+              </p>
+              <p className="text-sm text-themed-muted">
+                Your name or score is hidden, so crew points aren&apos;t being
+                collected{referral.forfeited_points ? (
+                  <> — you&apos;ve missed <strong>{referral.forfeited_points} points</strong> so far</>
+                ) : null}.{" "}
+                <Link href="/settings/privacy" className="text-brand hover:underline font-medium">
+                  Review privacy settings
+                </Link>
+              </p>
+            </section>
+          )}
+
           {/* Recent earnings feed — passive income, made tangible */}
           {referral && referral.recent_earnings.length > 0 && (
             <section className="rounded-2xl border border-themed-border bg-surface p-4 mb-6">
@@ -293,14 +314,27 @@ export default function SocialPage() {
                 <p className="p-8 text-center text-sm text-themed-muted">No friends yet — add some to send kudos.</p>
               ) : (
                 <div className="divide-y divide-themed-border">
-                  {acceptedFriends.map((f) => (
-                    <div key={f.id} className="flex items-center gap-3 px-5 py-3">
-                      <div className="flex h-9 w-9 items-center justify-center rounded-full bg-brand-light text-sm font-bold text-brand-dark">
-                        {initial(f.friend?.display_name)}
+                  {acceptedFriends.map((f) =>
+                    f.friend?.id ? (
+                      <Link
+                        key={f.id}
+                        href={`/profile/${f.friend.id}`}
+                        className="flex items-center gap-3 px-5 py-3 hover:bg-themed-border/20 transition"
+                      >
+                        <div className="flex h-9 w-9 items-center justify-center rounded-full bg-brand-light text-sm font-bold text-brand-dark">
+                          {initial(f.friend.display_name)}
+                        </div>
+                        <span className="text-sm text-themed-text">{f.friend.display_name || "Player"}</span>
+                      </Link>
+                    ) : (
+                      <div key={f.id} className="flex items-center gap-3 px-5 py-3">
+                        <div className="flex h-9 w-9 items-center justify-center rounded-full bg-brand-light text-sm font-bold text-brand-dark">
+                          {initial(f.friend?.display_name)}
+                        </div>
+                        <span className="text-sm text-themed-text">{f.friend?.display_name || "Player"}</span>
                       </div>
-                      <span className="text-sm text-themed-text">{f.friend?.display_name || "Player"}</span>
-                    </div>
-                  ))}
+                    )
+                  )}
                 </div>
               )}
               {pendingFriends.length > 0 && (

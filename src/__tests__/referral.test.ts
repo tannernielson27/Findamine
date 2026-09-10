@@ -1,5 +1,11 @@
 import { describe, it, expect } from "vitest";
-import { computeReferralPoints, generateReferralCode, REFERRAL_FRACTION } from "@/lib/services/referral";
+import {
+  computeReferralPoints,
+  generateReferralCode,
+  isDisclosureEligible,
+  DISCLOSURE_GATED_FIELDS,
+  REFERRAL_FRACTION,
+} from "@/lib/services/referral";
 
 describe("computeReferralPoints", () => {
   it("awards the configured fraction, rounded", () => {
@@ -30,5 +36,31 @@ describe("generateReferralCode", () => {
   it("is effectively unique across many draws", () => {
     const codes = new Set(Array.from({ length: 200 }, () => generateReferralCode()));
     expect(codes.size).toBeGreaterThan(190); // collisions extremely unlikely
+  });
+});
+
+describe("isDisclosureEligible (referral disclosure gate)", () => {
+  it("gates on display_name and total_score", () => {
+    expect([...DISCLOSURE_GATED_FIELDS].sort()).toEqual(["display_name", "total_score"]);
+  });
+
+  it("is eligible with unset visibility (defaults to everyone)", () => {
+    expect(isDisclosureEligible(undefined)).toBe(true);
+    expect(isDisclosureEligible({})).toBe(true);
+  });
+
+  it("is eligible at class or broader visibility", () => {
+    expect(isDisclosureEligible({ display_name: "class", total_score: "class" })).toBe(true);
+    expect(isDisclosureEligible({ display_name: "everyone", total_score: "class" })).toBe(true);
+  });
+
+  it("forfeits when a gated field is restricted below class", () => {
+    expect(isDisclosureEligible({ display_name: "team", total_score: "everyone" })).toBe(false);
+    expect(isDisclosureEligible({ display_name: "everyone", total_score: "nobody" })).toBe(false);
+    expect(isDisclosureEligible({ display_name: "nobody", total_score: "nobody" })).toBe(false);
+  });
+
+  it("ignores non-gated fields", () => {
+    expect(isDisclosureEligible({ real_name: "nobody", friends_list: "nobody" })).toBe(true);
   });
 });

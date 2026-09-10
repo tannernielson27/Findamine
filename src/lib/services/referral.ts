@@ -9,9 +9,26 @@
 import { randomInt } from "crypto";
 import { createSupabaseServiceClient } from "@/lib/supabase/server";
 import { trackEvent } from "@/lib/utils/track-event";
+import { canViewField } from "@/lib/utils/privacy";
 
 /** Share of a minion's score awarded to their recruiter. Calibration knob. */
 export const REFERRAL_FRACTION = 0.15;
+
+/**
+ * Fields a recruiter must keep visible (at "class" or better) to collect
+ * referral earnings. This is what makes the privacy↔reward tradeoff real
+ * (prospectus §3.2): you must be findable (display_name) and your success
+ * visible (total_score) to benefit from the social economy. Restricting them
+ * forfeits the bonus — visibly (see awardReferralPoints).
+ */
+export const DISCLOSURE_GATED_FIELDS = ["display_name", "total_score"] as const;
+
+/** Whether a recruiter's visibility settings qualify them for referral earnings. Pure. */
+export function isDisclosureEligible(
+  visibility: Record<string, string> | undefined
+): boolean {
+  return DISCLOSURE_GATED_FIELDS.every((field) => canViewField(visibility, "class", field));
+}
 
 /** Points a recruiter earns from a minion's score. Pure + testable. */
 export function computeReferralPoints(
@@ -148,6 +165,24 @@ export async function awardReferralPoints(
       .eq("minion_id", minionUserId)
       .maybeSingle();
     if (!link) return;
+
+    // Disclosure gate: the reward only flows while the recruiter's gated fields
+    // are visible. A forfeited bonus is logged (not paid) so the social page can
+    // show the recruiter exactly what their privacy settings cost them.
+    const { data: recruiter } = await supabase
+      .from("users")
+      .select("profile_visibility")
+      .eq("id", link.recruiter_id)
+      .maybeSingle();
+
+    if (!isDisclosureEligible(recruiter?.profile_visibility as Record<string, string> | undefined)) {
+      await trackEvent({
+        userId: link.recruiter_id,
+        eventType: "referral_bonus_forfeited",
+        payload: { amount, minion_id: minionUserId, source_id: sourceId, hunt_id: huntId },
+      });
+      return;
+    }
 
     await supabase.from("points_ledger").insert({
       user_id: link.recruiter_id,
