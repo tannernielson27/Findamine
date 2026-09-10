@@ -1,15 +1,29 @@
 "use client";
 
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
+import Link from "next/link";
 import {
   PROFILE_FIELDS, VISIBILITY_LABELS, CATEGORIES,
   type VisibilityLevel, type PrivacyTreatment,
   getDefaults,
 } from "@/lib/utils/privacy";
-import { logPrivacyEvent, diffVisibility, classifyChange } from "@/lib/utils/privacy-tracking";
+import {
+  logPrivacyEvent, diffVisibility, classifyChange, countOptionsShown,
+} from "@/lib/utils/privacy-tracking";
 import { computePrivacyIndex } from "@/lib/utils/privacy-index";
 
 const VISIBILITY_LEVELS: VisibilityLevel[] = ["nobody", "team", "class", "everyone"];
+
+// Baseline-survey gate (B2): the T1 timepoint must be answered after the
+// participant has seen the controls but before the first save.
+const GATE_TIMEPOINT = "T1";
+const GATE_POLL_MS = 20_000;
+
+interface PendingTriggerDelivery {
+  delivery_id: string;
+  survey_id: string;
+  timepoint: string | null;
+}
 
 export default function PrivacySettingsPage() {
   const [visibility, setVisibility] = useState<Record<string, VisibilityLevel>>({});
@@ -25,6 +39,12 @@ export default function PrivacySettingsPage() {
   const [friction, setFriction] = useState<"low" | "high" | null>(null);
   const [controlsRevealed, setControlsRevealed] = useState(true);
   const [confirmOpen, setConfirmOpen] = useState(false);
+
+  // ── Baseline-survey gate (Workstream B / B2) ─────────────────────
+  // Set only when the trigger endpoint reports a still-answerable T1 delivery
+  // for THIS user; non-participants never get one, so the gate never blocks them.
+  const [gateDeliveryId, setGateDeliveryId] = useState<string | null>(null);
+  const gateBlockedLoggedRef = useRef(false);
 
   // ── Research instrumentation (Task A3) ──────────────────────────
   // Refs are initialized to inert values and populated in effects (never call
@@ -51,6 +71,23 @@ export default function PrivacySettingsPage() {
           ? crypto.randomUUID()
           : String(Date.now());
     }
+    /** Fire the privacy_view survey trigger; gate on a pending T1 delivery. */
+    async function triggerBaselineSurvey() {
+      try {
+        const res = await fetch("/api/v1/surveys/trigger", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ event: "privacy_view" }),
+        });
+        if (!res.ok) return;
+        const data = (await res.json()) as { pending?: PendingTriggerDelivery[] };
+        const t1 = (data.pending || []).find((p) => p.timepoint === GATE_TIMEPOINT);
+        if (t1) setGateDeliveryId(t1.delivery_id);
+      } catch {
+        // Telemetry/gating must never break the page; no delivery → no gate.
+      }
+    }
+
     fetch("/api/v1/auth/me")
       .then((r) => r.json())
       .then(async (data) => {
@@ -85,12 +122,80 @@ export default function PrivacySettingsPage() {
             event_type: "privacy_view",
             page: "settings_privacy",
             session_id: sessionIdRef.current,
-            metadata: { treatment: t, friction: f === "low" || f === "high" ? f : null, index: computePrivacyIndex(loaded) },
+            metadata: {
+              treatment: t,
+              friction: f === "low" || f === "high" ? f : null,
+              index: computePrivacyIndex(loaded),
+              scheme: t,
+              options_shown: countOptionsShown(t), // objective option count (B4)
+            },
           });
+
+          // Seeing the controls is the event that issues the T1 baseline (B2).
+          void triggerBaselineSurvey();
         }
       })
       .catch(() => {});
   }, [ageBand]);
+
+  /** Emit a survey-gate step on the privacy_field_touch channel (once each). */
+  function logGateStep(step: "blocked" | "cleared") {
+    logPrivacyEvent({
+      event_type: "privacy_field_touch",
+      page: "settings_privacy",
+      session_id: sessionIdRef.current,
+      metadata: {
+        treatment: treatmentRef.current,
+        friction: frictionRef.current,
+        scope: `survey_gate:${step}`,
+        fields: [],
+      },
+    });
+  }
+
+  // Log the block once per page view, the moment the gate engages.
+  useEffect(() => {
+    if (!gateDeliveryId || gateBlockedLoggedRef.current) return;
+    gateBlockedLoggedRef.current = true;
+    logGateStep("blocked");
+  }, [gateDeliveryId]);
+
+  // Re-check the gated delivery on focus/visibility and on a slow poll, so
+  // returning from the survey re-enables Save without a reload.
+  const recheckGate = useCallback(async () => {
+    if (!gateDeliveryId) return;
+    try {
+      const res = await fetch(`/api/v1/surveys/${gateDeliveryId}/take`);
+      if (!res.ok) {
+        if (res.status === 404) setGateDeliveryId(null); // delivery gone → lift
+        return;
+      }
+      const data = (await res.json()) as { delivery?: { status?: string } };
+      const status = data.delivery?.status;
+      if (status && status !== "pending" && status !== "opened") {
+        setGateDeliveryId(null);
+        logGateStep("cleared");
+      }
+    } catch {
+      // keep current gate state on transient errors
+    }
+  }, [gateDeliveryId]);
+
+  useEffect(() => {
+    if (!gateDeliveryId) return;
+    const onFocus = () => void recheckGate();
+    const onVisible = () => {
+      if (document.visibilityState === "visible") void recheckGate();
+    };
+    window.addEventListener("focus", onFocus);
+    document.addEventListener("visibilitychange", onVisible);
+    const timer = window.setInterval(() => void recheckGate(), GATE_POLL_MS);
+    return () => {
+      window.removeEventListener("focus", onFocus);
+      document.removeEventListener("visibilitychange", onVisible);
+      window.clearInterval(timer);
+    };
+  }, [gateDeliveryId, recheckGate]);
 
   // Log abandonment when the user leaves with unsaved edits. Covers SPA unmount
   // AND hard exits (tab close, backgrounding) that unmount alone misses, and also
@@ -153,6 +258,7 @@ export default function PrivacySettingsPage() {
 
   /** Entry point for the Save button — may interpose the high-friction confirm. */
   function handleSave() {
+    if (gateDeliveryId) return; // baseline survey outstanding (B2)
     const direction = classifyChange(diffVisibility(originalRef.current, currentRef.current));
     if (friction === "high" && (direction === "tighten" || direction === "mixed")) {
       clickCountRef.current += 1;
@@ -255,6 +361,7 @@ export default function PrivacySettingsPage() {
   // where getDefaults returns an empty map). Saving is blocked until complete
   // so the first logged choice is a full, deliberate configuration.
   const unsetCount = PROFILE_FIELDS.filter((f) => !visibility[f.key]).length;
+  const surveyGated = gateDeliveryId !== null;
 
   return (
     <main className="mx-auto max-w-2xl px-4 py-4">
@@ -271,6 +378,30 @@ export default function PrivacySettingsPage() {
           think about what you&apos;re comfortable sharing with different groups of people.
         </p>
       </div>
+
+      {/* Baseline-survey gate (B2): non-dismissable until T1 is submitted. */}
+      {surveyGated && (
+        <div
+          role="status"
+          aria-live="polite"
+          className="rounded-lg border border-violet-200 bg-violet-50 p-4 mb-4"
+        >
+          <p className="text-sm font-semibold text-violet-900 mb-1">
+            One quick step first
+          </p>
+          <p className="text-xs text-violet-800 mb-3">
+            Before you set your privacy options, answer a short questionnaire about them.
+            It takes a couple of minutes, and your answers are private. Saving is turned on
+            as soon as you finish.
+          </p>
+          <Link
+            href={`/surveys/${gateDeliveryId}`}
+            className="inline-block rounded-lg bg-violet-600 px-4 py-2 text-xs font-semibold text-white hover:bg-violet-700 transition"
+          >
+            Answer the questionnaire
+          </Link>
+        </div>
+      )}
 
       {/* HIGH-friction gate: controls stay collapsed behind one more step. */}
       {!controlsRevealed && (
@@ -399,6 +530,11 @@ export default function PrivacySettingsPage() {
           and must make a complete first choice before saving (Workstream A / A10). */}
       {controlsRevealed && (
         <>
+          {surveyGated && (
+            <p className="text-xs text-violet-800 mb-2">
+              Saving is disabled until you complete the short questionnaire above.
+            </p>
+          )}
           {unsetCount > 0 && (
             <div className="rounded-lg bg-amber-50 border border-amber-200 p-3 mb-3">
               <p className="text-xs text-amber-800">
@@ -410,7 +546,8 @@ export default function PrivacySettingsPage() {
           <div className="flex items-center gap-3">
             <button
               onClick={handleSave}
-              disabled={saving || unsetCount > 0}
+              disabled={saving || unsetCount > 0 || surveyGated}
+              title={surveyGated ? "Complete the questionnaire first" : undefined}
               className="bg-brand text-white rounded-lg hover:bg-brand-dark transition-colors px-6 py-2 text-sm font-medium disabled:opacity-50"
             >
               {saving ? "Saving..." : "Save Privacy Settings"}

@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
-import { diffVisibility, classifyChange } from "@/lib/utils/privacy-tracking";
+import { diffVisibility, classifyChange, countOptionsShown } from "@/lib/utils/privacy-tracking";
 import { computePrivacyIndex } from "@/lib/utils/privacy-index";
-import { PROFILE_FIELD_KEYS } from "@/lib/utils/privacy";
+import { PROFILE_FIELD_KEYS, PROFILE_FIELDS, CATEGORIES, VISIBILITY_LABELS } from "@/lib/utils/privacy";
 
 describe("diffVisibility", () => {
   it("returns only changed fields", () => {
@@ -76,5 +76,34 @@ describe("computePrivacyIndex", () => {
     const allClass = Object.fromEntries(PROFILE_FIELD_KEYS.map((k) => [k, "class"]));
     const allTeam = Object.fromEntries(PROFILE_FIELD_KEYS.map((k) => [k, "team"]));
     expect(computePrivacyIndex(allClass)).toBeLessThan(computePrivacyIndex(allTeam));
+  });
+});
+
+describe("countOptionsShown (B4 objective option count)", () => {
+  const levels = Object.keys(VISIBILITY_LABELS).length;
+
+  it("simple = one master control x levels", () => {
+    expect(countOptionsShown("simple")).toBe(levels);
+    expect(countOptionsShown("simple")).toBe(4);
+  });
+
+  it("moderate = categories x levels (derived from CATEGORIES, not hard-coded)", () => {
+    expect(countOptionsShown("moderate")).toBe(CATEGORIES.length * levels);
+    expect(countOptionsShown("moderate")).toBe(12);
+  });
+
+  it("complex = fields x levels (derived from PROFILE_FIELDS, not hard-coded)", () => {
+    expect(countOptionsShown("complex")).toBe(PROFILE_FIELDS.length * levels);
+    expect(countOptionsShown("complex")).toBe(32);
+  });
+
+  it("is monotonic in complexity", () => {
+    expect(countOptionsShown("simple")).toBeLessThan(countOptionsShown("moderate"));
+    expect(countOptionsShown("moderate")).toBeLessThan(countOptionsShown("complex"));
+  });
+
+  it("unknown scheme shows no controls → 0", () => {
+    expect(countOptionsShown("")).toBe(0);
+    expect(countOptionsShown("bogus")).toBe(0);
   });
 });

@@ -7,7 +7,12 @@
  * intentionally side-effecting and never throws.
  */
 
-import { type VisibilityLevel } from "@/lib/utils/privacy";
+import {
+  CATEGORIES,
+  PROFILE_FIELDS,
+  VISIBILITY_LABELS,
+  type VisibilityLevel,
+} from "@/lib/utils/privacy";
 
 // Ordinal restrictiveness: higher = more private. Unset is treated as "everyone".
 const ORDINAL: Record<VisibilityLevel, number> = {
@@ -60,6 +65,30 @@ export function classifyChange(deltas: FieldDelta[]): ChangeDirection {
   if (tighten) return "tighten";
   if (loosen) return "loosen";
   return "none";
+}
+
+/** Number of visibility levels offered per control (nobody/team/class/everyone). */
+const LEVEL_COUNT = Object.keys(VISIBILITY_LABELS).length;
+
+/**
+ * Objective number of options a participant is shown on the privacy page under
+ * a control-complexity scheme (Workstream B / Task B4). One control × its
+ * levels: simple = 1 master control; moderate = one control per category;
+ * complex = one control per profile field. Derived from the real constants so
+ * it tracks any change to the field/category lists. Unknown scheme → 0 (the
+ * page renders no controls for it).
+ */
+export function countOptionsShown(scheme: string): number {
+  switch (scheme) {
+    case "simple":
+      return LEVEL_COUNT;
+    case "moderate":
+      return CATEGORIES.length * LEVEL_COUNT;
+    case "complex":
+      return PROFILE_FIELDS.length * LEVEL_COUNT;
+    default:
+      return 0;
+  }
 }
 
 export interface PrivacyEventPayload {
