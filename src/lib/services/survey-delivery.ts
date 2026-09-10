@@ -86,3 +86,66 @@ export async function expireStaleDeliveries(): Promise<number> {
     .select("id");
   return (data || []).length;
 }
+
+const REMINDER_TYPE = "survey_reminder";
+const REMINDER_COOLDOWN_DAYS = 3;
+
+/**
+ * Nudge participants who have a pending/opened (unsubmitted, unexpired) survey,
+ * so T2/T3 response rates don't collapse to silent expiry. Selects recipients
+ * ONLY by delivery status — never by privacy condition — mirroring the
+ * re-engagement cron's research-integrity guardrail. Cooldown-limited and
+ * respects a user's disabled notification types. Returns count of reminders sent.
+ */
+export async function sendSurveyReminders(): Promise<number> {
+  const supabase = await createSupabaseServiceClient();
+  const now = Date.now();
+
+  const { data: deliveries } = await supabase
+    .from("survey_deliveries")
+    .select("user_id, expires_at, status, surveys(title)")
+    .in("status", ["pending", "opened"]);
+  if (!deliveries || deliveries.length === 0) return 0;
+
+  // Group unexpired deliveries per participant.
+  const byUser = new Map<string, number>();
+  for (const d of deliveries) {
+    if (d.expires_at && new Date(d.expires_at).getTime() <= now) continue; // effectively expired
+    byUser.set(d.user_id, (byUser.get(d.user_id) || 0) + 1);
+  }
+  if (byUser.size === 0) return 0;
+
+  const cutoff = new Date(now - REMINDER_COOLDOWN_DAYS * DAY_MS).toISOString();
+  let sent = 0;
+
+  for (const [userId, count] of byUser) {
+    // Cooldown: skip if we reminded this user recently.
+    const { data: last } = await supabase
+      .from("notifications")
+      .select("created_at")
+      .eq("user_id", userId)
+      .eq("type", REMINDER_TYPE)
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    if (last?.created_at && last.created_at > cutoff) continue;
+
+    // Respect an explicit opt-out of this notification type.
+    const { data: prefs } = await supabase
+      .from("notification_preferences")
+      .select("disabled_types")
+      .eq("user_id", userId)
+      .maybeSingle();
+    if ((prefs?.disabled_types || []).includes(REMINDER_TYPE)) continue;
+
+    const title = count > 1 ? `${count} surveys waiting` : "A quick survey is waiting";
+    const body =
+      "You have a short check-in to complete. It only takes a couple of minutes, and your answers are private.";
+    const { error } = await supabase
+      .from("notifications")
+      .insert({ user_id: userId, type: REMINDER_TYPE, title, body });
+    if (!error) sent++;
+  }
+
+  return sent;
+}
