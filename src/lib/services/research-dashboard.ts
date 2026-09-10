@@ -8,6 +8,7 @@
 
 import { createSupabaseServiceClient } from "@/lib/supabase/server";
 import { checkBalance } from "@/lib/services/randomization";
+import { ENROLLMENT_FAILED_EVENT } from "@/lib/services/enrollment";
 
 export interface StudyHealth {
   study: {
@@ -18,6 +19,11 @@ export interface StudyHealth {
     current_sample_size: number;
     target_sample_size: number | null;
   } | null;
+  /**
+   * research/study_enrollment_failed behavioral_events in the last 7 days (B7).
+   * Not study-scoped: a failure can happen before the study is even resolved.
+   */
+  enrollment_failures_7d: number;
   balance: Awaited<ReturnType<typeof checkBalance>>;
   logging: {
     participants: number;
@@ -61,6 +67,15 @@ export async function getStudyHealth(studyId: string): Promise<StudyHealth> {
   const userIds = (enrollments || []).map((e) => e.user_id);
 
   const balance = await checkBalance(studyId);
+
+  // Enrollment failures surfaced by enrollParticipant()'s catch block (B7).
+  const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 3_600_000).toISOString();
+  const { count: enrollmentFailures7d } = await supabase
+    .from("behavioral_events")
+    .select("*", { count: "exact", head: true })
+    .eq("event_type", ENROLLMENT_FAILED_EVENT.eventType)
+    .eq("event_name", ENROLLMENT_FAILED_EVENT.eventName)
+    .gte("created_at", sevenDaysAgo);
 
   // Logging completeness.
   const usersWithEvents = new Set<string>();
@@ -160,6 +175,7 @@ export async function getStudyHealth(studyId: string): Promise<StudyHealth> {
 
   return {
     study: study || null,
+    enrollment_failures_7d: enrollmentFailures7d || 0,
     balance,
     logging: {
       participants: userIds.length,

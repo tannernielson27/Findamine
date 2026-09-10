@@ -78,6 +78,42 @@ export function serialize(headers: string[], rows: string[][], format: ExportFor
   return serializeTable(headers, rows, format === "tsv" ? "\t" : ",");
 }
 
+/** `treatment_<dimension>` header for one dimension name. Pure. */
+export function treatmentHeader(dimensionName: string): string {
+  return `treatment_${dimensionName.replace(/\s/g, "_").toLowerCase()}`;
+}
+
+/** The two legacy denormalized condition columns (migration 048). */
+export interface LegacyConditionColumns {
+  treatment?: string | null;
+  privacy_default?: string | null;
+}
+
+/** Dimension name → which legacy column carried it before migration 053. */
+const LEGACY_COLUMN_FOR_DIMENSION: Readonly<Record<string, keyof LegacyConditionColumns>> = {
+  privacy_control_complexity: "treatment",
+  privacy_default: "privacy_default",
+};
+
+/**
+ * One value per dimension for a long-format row: the `conditions` JSONB map
+ * (migration 053) first, falling back to the legacy column for the two
+ * dimensions that had one, else "". Pure.
+ */
+export function conditionValues(
+  dimensionNames: readonly string[],
+  conditions: Record<string, unknown> | null | undefined,
+  legacy: LegacyConditionColumns | null | undefined
+): string[] {
+  return dimensionNames.map((name) => {
+    const fromJson = conditions?.[name];
+    if (typeof fromJson === "string" && fromJson) return fromJson;
+    const col = LEGACY_COLUMN_FOR_DIMENSION[name];
+    const fromLegacy = col ? legacy?.[col] : undefined;
+    return typeof fromLegacy === "string" ? fromLegacy : "";
+  });
+}
+
 export async function generateResearchExport(config: ExportConfig): Promise<string> {
   const supabase = await createSupabaseServiceClient();
 
@@ -310,7 +346,7 @@ export async function generateResearchExport(config: ExportConfig): Promise<stri
     "age_band",
     "role",
     "enrolled_at",
-    ...Array.from(dimensionNames).map((d) => `treatment_${d.replace(/\s/g, "_").toLowerCase()}`),
+    ...Array.from(dimensionNames).map(treatmentHeader),
     "total_hunts_completed",
     "total_finds_completed",
     "total_points",
@@ -405,8 +441,9 @@ export async function generateResearchExport(config: ExportConfig): Promise<stri
 /**
  * Long-format privacy-index trajectory export: one row per snapshot, keyed to the
  * same anonymized participant ids as the participant-level export. Includes the
- * snapshot source, the neutral `unset` flag, and denormalized condition — the
- * shape growth-model / fatigue-over-time analyses (H4/H5) want.
+ * snapshot source, the neutral `unset` flag, and one treatment_<dimension>
+ * column per study dimension (from the row's `conditions` map, migration 053) —
+ * the shape growth-model / fatigue-over-time analyses (H4/H5) want.
  */
 export async function generateTrajectoryExport(config: ExportConfig): Promise<string> {
   const supabase = await createSupabaseServiceClient();
@@ -428,11 +465,13 @@ export async function generateTrajectoryExport(config: ExportConfig): Promise<st
 
   const { data: snapshots } = await supabase
     .from("privacy_index_snapshots")
-    .select("user_id, index_value, source, unset, treatment, privacy_default, created_at")
+    .select("user_id, index_value, source, unset, treatment, privacy_default, conditions, created_at")
     .in("user_id", userIds)
     .order("created_at", { ascending: true });
 
-  const frictionByUser = await loadFrictionAssignments(supabase, userIds);
+  // One treatment_<dimension> column per dimension linked to the study, read
+  // from the row's own `conditions` map (legacy columns as fallback).
+  const dimensionNames = await loadStudyDimensionNames(supabase, config.studyId);
 
   const headers = [
     "participant_id",
@@ -441,9 +480,7 @@ export async function generateTrajectoryExport(config: ExportConfig): Promise<st
     "index_value",
     "source",
     "unset",
-    "treatment",
-    "privacy_default",
-    "privacy_friction",
+    ...dimensionNames.map(treatmentHeader),
   ];
 
   const rows: string[][] = [];
@@ -463,9 +500,7 @@ export async function generateTrajectoryExport(config: ExportConfig): Promise<st
       Number(s.index_value).toFixed(4),
       s.source ?? "",
       s.unset ? "true" : "false",
-      (s.treatment as string) ?? "",
-      (s.privacy_default as string) ?? "",
-      frictionByUser.get(s.user_id) ?? "",
+      ...conditionValues(dimensionNames, s.conditions as Record<string, unknown> | null, s),
     ]);
   }
 
@@ -474,21 +509,26 @@ export async function generateTrajectoryExport(config: ExportConfig): Promise<st
 
 type ServiceClient = Awaited<ReturnType<typeof createSupabaseServiceClient>>;
 
-/** privacy_friction assignment per user (denormalized onto long-format rows). */
-async function loadFrictionAssignments(
+/**
+ * Names of the dimensions linked to a study, in sort_order (then name) so the
+ * long-format datasets emit treatment_<dimension> columns in a stable order.
+ */
+async function loadStudyDimensionNames(
   supabase: ServiceClient,
-  userIds: string[]
-): Promise<Map<string, string>> {
-  const result = new Map<string, string>();
+  studyId: string
+): Promise<string[]> {
   const { data } = await supabase
-    .from("dimension_assignments")
-    .select("user_id, level, treatment_dimensions(name)")
-    .in("user_id", userIds);
-  for (const a of data || []) {
-    const name = (a.treatment_dimensions as unknown as { name: string })?.name;
-    if (name === "privacy_friction") result.set(a.user_id, a.level);
-  }
-  return result;
+    .from("treatment_study_dimensions")
+    .select("sort_order, treatment_dimensions(name)")
+    .eq("study_id", studyId);
+  return (data || [])
+    .map((r) => ({
+      sort: (r.sort_order as number | null) ?? 0,
+      name: (r.treatment_dimensions as unknown as { name: string } | null)?.name ?? "",
+    }))
+    .filter((r) => r.name)
+    .sort((a, b) => a.sort - b.sort || a.name.localeCompare(b.name))
+    .map((r) => r.name);
 }
 
 /**
@@ -514,12 +554,12 @@ export async function generateEventsExport(config: ExportConfig): Promise<string
   userIds.forEach((uid, i) => pidByUser.set(uid, participantId(i)));
   for (const e of enrollments) enrolledAtByUser.set(e.user_id, e.enrolled_at);
 
-  const frictionByUser = await loadFrictionAssignments(supabase, userIds);
+  const dimensionNames = await loadStudyDimensionNames(supabase, config.studyId);
 
   const { data: events } = await supabase
     .from("privacy_events")
     .select(
-      "user_id, event_type, page, duration_ms, click_count, session_id, treatment, privacy_default, metadata, created_at"
+      "user_id, event_type, page, duration_ms, click_count, session_id, treatment, privacy_default, conditions, metadata, created_at"
     )
     .in("user_id", userIds)
     .order("created_at", { ascending: true });
@@ -539,9 +579,7 @@ export async function generateEventsExport(config: ExportConfig): Promise<string
     "duration_ms",
     "click_count",
     "session_id",
-    "treatment",
-    "privacy_default",
-    "privacy_friction",
+    ...dimensionNames.map(treatmentHeader),
   ];
 
   const rows: string[][] = [];
@@ -577,9 +615,7 @@ export async function generateEventsExport(config: ExportConfig): Promise<string
       e.duration_ms === null || e.duration_ms === undefined ? "" : String(e.duration_ms),
       e.click_count === null || e.click_count === undefined ? "" : String(e.click_count),
       e.session_id ?? "",
-      (e.treatment as string) ?? "",
-      (e.privacy_default as string) ?? "",
-      frictionByUser.get(e.user_id) ?? "",
+      ...conditionValues(dimensionNames, e.conditions as Record<string, unknown> | null, e),
     ]);
   }
 

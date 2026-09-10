@@ -8,7 +8,8 @@
 
 import { NextRequest } from "next/server";
 import { createSupabaseServiceClient } from "@/lib/supabase/server";
-import { computePrivacyIndex } from "@/lib/utils/privacy-index";
+import { buildSnapshotRow } from "@/lib/services/privacy-snapshots";
+import { conditionsFromMetadata } from "@/lib/utils/conditions";
 
 export const maxDuration = 60; // seconds
 
@@ -45,18 +46,16 @@ export async function GET(request: NextRequest) {
     .select("id, profile_visibility, metadata")
     .in("id", userIds);
 
+  // Same row shape as the single-snapshot path, including the generic
+  // `conditions` map (migration 053) alongside the two legacy columns.
   const rows = (users || []).map((u) => {
     const visibility = (u.profile_visibility || {}) as Record<string, string>;
     const metadata = (u.metadata || {}) as Record<string, unknown>;
-    return {
-      user_id: u.id,
-      index_value: computePrivacyIndex(visibility),
-      source: "scheduled" as const,
-      visibility,
+    return buildSnapshotRow(u.id, visibility, "scheduled", {
       treatment: (metadata.privacy_treatment as string) ?? null,
-      privacy_default: (metadata.privacy_default as string) ?? null,
-      unset: Object.keys(visibility).length === 0,
-    };
+      privacyDefault: (metadata.privacy_default as string) ?? null,
+      conditions: conditionsFromMetadata(metadata),
+    });
   });
 
   let written = 0;

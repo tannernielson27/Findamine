@@ -1,5 +1,11 @@
 import { describe, it, expect } from "vitest";
-import { cartesianProduct, stratumKeyFor } from "@/lib/services/randomization";
+import {
+  cartesianProduct,
+  stratumKeyFor,
+  resolveLevels,
+  pickLeastFilledCell,
+  cellKey,
+} from "@/lib/services/randomization";
 import { isUnset } from "@/lib/services/privacy-snapshots";
 
 describe("cartesianProduct", () => {
@@ -62,5 +68,73 @@ describe("isUnset", () => {
 
   it("treats any populated map as a made choice", () => {
     expect(isUnset({ display_name: "everyone" })).toBe(false);
+  });
+});
+
+describe("resolveLevels (per-study level subsets, migration 052)", () => {
+  const dim = { id: "d1", name: "privacy_default", levels: ["private", "neutral", "public"] };
+
+  it("respects a non-empty active subset", () => {
+    expect(resolveLevels(dim, ["private", "public"])).toEqual(["private", "public"]);
+  });
+
+  it("preserves the dimension's ordering and collapses duplicates", () => {
+    expect(resolveLevels(dim, ["public", "private", "public"])).toEqual(["private", "public"]);
+  });
+
+  it("falls back to every level when active_levels is null, undefined, or empty", () => {
+    expect(resolveLevels(dim, null)).toEqual(dim.levels);
+    expect(resolveLevels(dim, undefined)).toEqual(dim.levels);
+    expect(resolveLevels(dim, [])).toEqual(dim.levels);
+  });
+
+  it("returns a copy, never the dimension's own array", () => {
+    expect(resolveLevels(dim, null)).not.toBe(dim.levels);
+  });
+
+  it("throws a clear error for a level outside the dimension", () => {
+    expect(() => resolveLevels(dim, ["private", "bogus"])).toThrow(
+      /Invalid active_levels for privacy_default: \[bogus\]/
+    );
+  });
+
+  it("narrows the joint design when combined with cartesianProduct", () => {
+    const friction = { name: "privacy_friction", levels: ["low", "high"] };
+    const cells = cartesianProduct([resolveLevels(dim, ["private", "public"]), resolveLevels(friction, null)]);
+    expect(cells).toHaveLength(4);
+  });
+});
+
+describe("pickLeastFilledCell", () => {
+  const cells = [["a"], ["b"], ["c"]];
+
+  it("returns the unique least-filled cell", () => {
+    const counts = new Map([
+      [cellKey(["a"]), 2],
+      [cellKey(["b"]), 0],
+      [cellKey(["c"]), 1],
+    ]);
+    expect(pickLeastFilledCell(cells, counts)).toEqual(["b"]);
+  });
+
+  it("treats cells missing from the count map as empty", () => {
+    const counts = new Map([[cellKey(["a"]), 1], [cellKey(["b"]), 1]]);
+    expect(pickLeastFilledCell(cells, counts)).toEqual(["c"]);
+  });
+
+  it("breaks ties with the injected random source", () => {
+    const counts = new Map<string, number>();
+    expect(pickLeastFilledCell(cells, counts, () => 0)).toEqual(["a"]);
+    expect(pickLeastFilledCell(cells, counts, () => 0.99)).toEqual(["c"]);
+  });
+
+  it("ignores counts for cells outside the active set", () => {
+    // A legacy "neutral" cell with many participants must not affect selection.
+    const counts = new Map([[cellKey(["neutral"]), 50], [cellKey(["a"]), 1], [cellKey(["c"]), 1]]);
+    expect(pickLeastFilledCell(cells, counts)).toEqual(["b"]);
+  });
+
+  it("throws when there are no cells", () => {
+    expect(() => pickLeastFilledCell([], new Map())).toThrow(/No cells/);
   });
 });

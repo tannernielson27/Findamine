@@ -9,6 +9,7 @@ import { createSupabaseServiceClient } from "@/lib/supabase/server";
 import { diffVisibility, classifyChange } from "@/lib/utils/privacy-tracking";
 import { computePrivacyIndex } from "@/lib/utils/privacy-index";
 import { recordPrivacyIndexSnapshot } from "@/lib/services/privacy-snapshots";
+import { conditionsFromMetadata, DIMENSION_META_PREFIX } from "@/lib/utils/conditions";
 
 interface PrivacyMeta {
   duration_ms?: number;
@@ -66,8 +67,13 @@ export async function PUT(request: NextRequest) {
         "privacy_friction",
         "privacy_first_choice_at",
       ];
-      const clientMeta = { ...((body.metadata as Record<string, unknown>) || {}) };
-      for (const key of PROTECTED_META_KEYS) delete clientMeta[key];
+      // `dim_<dimension>` keys are the generic condition convention written by
+      // enrollment (read by conditionsFromMetadata) — equally server-owned.
+      const clientMeta = Object.fromEntries(
+        Object.entries((body.metadata as Record<string, unknown>) || {}).filter(
+          ([key]) => !PROTECTED_META_KEYS.includes(key) && !key.startsWith(DIMENSION_META_PREFIX)
+        )
+      );
       const mergedMeta: Record<string, unknown> = {
         ...existingMeta,
         ...clientMeta,
@@ -104,6 +110,9 @@ export async function PUT(request: NextRequest) {
       const treatment = (existingMeta.privacy_treatment as string) ?? null;
       const privacyDefault = (existingMeta.privacy_default as string) ?? null;
       const privacyFriction = (existingMeta.privacy_friction as string) ?? null;
+      // Generic `{ dimension: level }` map (migration 053), from the server-owned
+      // metadata read BEFORE this update so a client payload can never influence it.
+      const conditions = conditionsFromMetadata(existingMeta);
       const meta = (body.privacy_meta || {}) as PrivacyMeta;
 
       await supabase.from("privacy_events").insert({
@@ -117,6 +126,7 @@ export async function PUT(request: NextRequest) {
         session_id: meta.session_id || null,
         treatment,
         privacy_default: privacyDefault,
+        conditions,
         metadata: {
           deltas,
           direction: classifyChange(deltas),
@@ -130,6 +140,7 @@ export async function PUT(request: NextRequest) {
       await recordPrivacyIndexSnapshot(user.id, newVisibility, "change", {
         treatment,
         privacyDefault,
+        conditions,
       });
     }
 

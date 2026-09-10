@@ -6,6 +6,8 @@ import {
   tableToJSON,
   serialize,
   countReversals,
+  conditionValues,
+  treatmentHeader,
 } from "@/lib/services/research-export";
 
 describe("countReversals (change-then-undo across saves)", () => {
@@ -134,5 +136,54 @@ describe("serialize", () => {
     expect(serialize(headers, rows, "csv")).toBe("a,b\n1,2");
     expect(serialize(headers, rows, "tsv")).toBe("a\tb\n1\t2");
     expect(JSON.parse(serialize(headers, rows, "json"))).toEqual([{ a: "1", b: "2" }]);
+  });
+});
+
+describe("treatmentHeader", () => {
+  it("prefixes and normalizes a dimension name", () => {
+    expect(treatmentHeader("privacy_default")).toBe("treatment_privacy_default");
+    expect(treatmentHeader("Nudge Timing")).toBe("treatment_nudge_timing");
+  });
+});
+
+describe("conditionValues (conditions JSONB with legacy fallback, migration 053)", () => {
+  const dims = ["privacy_default", "privacy_friction", "privacy_control_complexity"];
+
+  it("reads every dimension from the conditions map", () => {
+    expect(
+      conditionValues(
+        dims,
+        { privacy_default: "private", privacy_friction: "high", privacy_control_complexity: "moderate" },
+        { treatment: "simple", privacy_default: "public" } // ignored when JSON has the key
+      )
+    ).toEqual(["private", "high", "moderate"]);
+  });
+
+  it("falls back to the legacy columns for the two dimensions that had one", () => {
+    expect(conditionValues(dims, {}, { treatment: "moderate", privacy_default: "neutral" })).toEqual([
+      "neutral",
+      "",
+      "moderate",
+    ]);
+    expect(conditionValues(dims, null, { treatment: "moderate", privacy_default: null })).toEqual([
+      "",
+      "",
+      "moderate",
+    ]);
+  });
+
+  it("emits an empty string when neither source has the dimension", () => {
+    expect(conditionValues(["brand_new_factor"], {}, {})).toEqual([""]);
+    expect(conditionValues(["brand_new_factor"], undefined, undefined)).toEqual([""]);
+  });
+
+  it("ignores non-string JSON values", () => {
+    expect(conditionValues(["privacy_default"], { privacy_default: 3 }, { privacy_default: "public" })).toEqual([
+      "public",
+    ]);
+  });
+
+  it("keeps column order aligned with the dimension list", () => {
+    expect(conditionValues(["b", "a"], { a: "1", b: "2" }, null)).toEqual(["2", "1"]);
   });
 });

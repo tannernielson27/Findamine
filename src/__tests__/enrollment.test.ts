@@ -4,7 +4,11 @@ import {
   deriveTreatment,
   deriveDefaultCondition,
   deriveFrictionCondition,
+  describeEnrollmentFailure,
+  dimensionMetadataKeys,
+  ENROLLMENT_FAILED_EVENT,
 } from "@/lib/services/enrollment";
+import { conditionsFromMetadata } from "@/lib/utils/conditions";
 import { PROFILE_FIELDS, getDefaults } from "@/lib/utils/privacy";
 
 describe("computeInitialVisibility", () => {
@@ -99,5 +103,52 @@ describe("deriveFrictionCondition (prospectus Factor B)", () => {
     expect(
       deriveFrictionCondition([{ dimensionName: "privacy_friction", level: "medium" }])
     ).toBeUndefined();
+  });
+});
+
+describe("describeEnrollmentFailure (B7)", () => {
+  it("captures an Error's message, the stage reached, and the study", () => {
+    expect(describeEnrollmentFailure(new Error("boom"), "randomize", "s1")).toEqual({
+      message: "boom",
+      stage: "randomize",
+      study_id: "s1",
+    });
+  });
+
+  it("omits study_id when the failure happened before the study was resolved", () => {
+    expect(describeEnrollmentFailure(new Error("db down"), "find_study", null)).toEqual({
+      message: "db down",
+      stage: "find_study",
+    });
+  });
+
+  it("handles non-Error throwables", () => {
+    expect(describeEnrollmentFailure("plain string", "write_user").message).toBe("plain string");
+    expect(describeEnrollmentFailure({ code: "42P01" }, "write_user").message).toBe('{"code":"42P01"}');
+    expect(describeEnrollmentFailure(undefined, "init").message).toBe("Unknown enrollment error");
+  });
+
+  it("uses the research/study_enrollment_failed event identity", () => {
+    expect(ENROLLMENT_FAILED_EVENT).toEqual({
+      eventType: "research",
+      eventName: "study_enrollment_failed",
+    });
+  });
+});
+
+describe("dimensionMetadataKeys → conditionsFromMetadata round trip", () => {
+  it("writes dim_<name> keys that read back as conditions", () => {
+    const named = [
+      { dimensionName: "privacy_default", level: "private" },
+      { dimensionName: "privacy_friction", level: "high" },
+      { dimensionName: "", level: "ignored" },
+    ];
+    const keys = dimensionMetadataKeys(named);
+    expect(keys).toEqual({ dim_privacy_default: "private", dim_privacy_friction: "high" });
+    expect(conditionsFromMetadata({ ...keys, privacy_treatment: "moderate" })).toEqual({
+      privacy_control_complexity: "moderate",
+      privacy_default: "private",
+      privacy_friction: "high",
+    });
   });
 });

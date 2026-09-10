@@ -1,6 +1,7 @@
 import { NextRequest } from "next/server";
 import { createSupabaseServiceClient } from "@/lib/supabase/server";
 import { getAuthUser, errorResponse, ApiError } from "@/lib/utils/api-auth";
+import { conditionsFromMetadata } from "@/lib/utils/conditions";
 
 // Log privacy-related events (Studies 1-3)
 export async function POST(request: NextRequest) {
@@ -22,11 +23,24 @@ export async function POST(request: NextRequest) {
 
     const supabase = await createSupabaseServiceClient();
 
+    // Stamp the participant's assigned condition server-side (never trusted from
+    // the client): legacy columns + the generic `conditions` map (migration 053).
+    const { data: userRow } = await supabase
+      .from("users")
+      .select("metadata")
+      .eq("id", user.id)
+      .maybeSingle();
+    const meta = (userRow?.metadata || {}) as Record<string, unknown>;
+    const conditions = conditionsFromMetadata(meta);
+
     const { data, error } = await supabase
       .from("privacy_events")
       .insert({
         user_id: user.id,
         event_type: body.event_type,
+        treatment: (meta.privacy_treatment as string) ?? null,
+        privacy_default: (meta.privacy_default as string) ?? null,
+        conditions,
         page: body.page || null,
         old_value: body.old_value || null,
         new_value: body.new_value || null,

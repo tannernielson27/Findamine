@@ -11,6 +11,8 @@
  *   times — the same balance guarantee a permuted block gives, without having to
  *   persist block state (which the previous global greedy min-count did not do,
  *   and which its unused `blockSize` implied but never implemented).
+ * - Per-study level subsets: a study may cross only some of a dimension's
+ *   levels via treatment_study_dimensions.active_levels (migration 052).
  * - Balance checking across cells (checkBalance).
  */
 
@@ -20,6 +22,11 @@ export interface RandomizationConfig {
   studyId: string;
   dimensionIds: string[];
   stratifyBy?: ("age_band" | "school_id")[];
+  /**
+   * Per-study level subset per dimension id (treatment_study_dimensions.active_levels).
+   * When omitted, assignParticipant loads it from the study's link rows itself.
+   */
+  activeLevels?: Record<string, string[] | null | undefined>;
   /** @deprecated Superseded by least-filled-cell minimization; kept for callers. */
   blockSize?: number;
 }
@@ -29,12 +36,48 @@ export interface AssignmentResult {
   assignments: { dimensionId: string; level: string }[];
 }
 
+/** The subset of a treatment_dimensions row the pure helpers need. */
+export interface DimensionLevels {
+  id?: string;
+  name?: string;
+  levels: string[];
+}
+
 /** Cartesian product of each dimension's levels → one array of levels per cell. */
 export function cartesianProduct(levelSets: string[][]): string[][] {
   return levelSets.reduce<string[][]>(
     (acc, levels) => acc.flatMap((prefix) => levels.map((l) => [...prefix, l])),
     [[]]
   );
+}
+
+/**
+ * Resolve the level set a study randomizes over for one dimension. Pure.
+ *
+ * - `activeLevels` null/undefined/empty → the dimension's full `levels`.
+ * - otherwise → the dimension's `levels` filtered to the active subset. The
+ *   dimension's own ordering is preserved (rather than the order the admin
+ *   typed the subset) so cell keys are stable regardless of how the subset was
+ *   entered; duplicates in the subset are collapsed.
+ * - Any active level that is not a member of `dimension.levels` is a
+ *   configuration error and throws.
+ */
+export function resolveLevels(
+  dimension: DimensionLevels,
+  activeLevels: readonly string[] | null | undefined
+): string[] {
+  const full = dimension.levels ?? [];
+  if (!activeLevels || activeLevels.length === 0) return [...full];
+
+  const unknown = activeLevels.filter((l) => !full.includes(l));
+  if (unknown.length > 0) {
+    const label = dimension.name ?? dimension.id ?? "dimension";
+    throw new Error(
+      `Invalid active_levels for ${label}: [${unknown.join(", ")}] not in dimension levels [${full.join(", ")}]`
+    );
+  }
+  const active = new Set(activeLevels);
+  return full.filter((l) => active.has(l));
 }
 
 /** Build a stratum key from a user's variables and the configured strata. Pure. */
@@ -47,6 +90,46 @@ export function stratumKeyFor(
   if (stratifyBy?.includes("age_band")) parts.push(`band:${band || "unknown"}`);
   if (stratifyBy?.includes("school_id")) parts.push(`school:${schoolId || "none"}`);
   return parts.join("|") || "all";
+}
+
+/** Stable key for one joint cell. */
+export function cellKey(levels: readonly string[]): string {
+  return levels.join("|");
+}
+
+/**
+ * Pick the least-filled cell among `cells`, breaking ties uniformly at random
+ * via `random` (injectable for tests). Cells absent from `counts` are treated
+ * as empty. Pure given `random`.
+ */
+export function pickLeastFilledCell(
+  cells: readonly string[][],
+  counts: ReadonlyMap<string, number>,
+  random: () => number = Math.random
+): string[] {
+  if (cells.length === 0) throw new Error("No cells to assign");
+  const countOf = (c: readonly string[]) => counts.get(cellKey(c)) ?? 0;
+  const min = Math.min(...cells.map(countOf));
+  const candidates = cells.filter((c) => countOf(c) === min);
+  return candidates[Math.floor(random() * candidates.length)];
+}
+
+/**
+ * Load the study's active_levels per dimension id from treatment_study_dimensions.
+ */
+async function loadActiveLevels(
+  supabase: Awaited<ReturnType<typeof createSupabaseServiceClient>>,
+  studyId: string,
+  dimensionIds: string[]
+): Promise<Record<string, string[] | null>> {
+  const { data } = await supabase
+    .from("treatment_study_dimensions")
+    .select("dimension_id, active_levels")
+    .eq("study_id", studyId)
+    .in("dimension_id", dimensionIds);
+  return Object.fromEntries(
+    (data || []).map((r) => [r.dimension_id as string, (r.active_levels as string[] | null) ?? null])
+  );
 }
 
 /**
@@ -72,6 +155,13 @@ export async function assignParticipant(
   }
   const dims = [...dimensionsRaw].sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
 
+  // Per-study level subsets (migration 052). Validated by resolveLevels.
+  const activeLevels =
+    config.activeLevels ?? (await loadActiveLevels(supabase, config.studyId, dims.map((d) => d.id)));
+  const levelSets = dims.map((d) =>
+    resolveLevels({ id: d.id, name: d.name, levels: d.levels as string[] }, activeLevels[d.id])
+  );
+
   // This participant's stratum.
   const { data: userProfile } = await supabase
     .from("user_profiles")
@@ -90,11 +180,13 @@ export async function assignParticipant(
   );
 
   // Enumerate the joint cells (one level per dimension, in dims order).
-  const cells = cartesianProduct(dims.map((d) => d.levels as string[]));
-  const cellKey = (levels: string[]) => levels.join("|");
+  const cells = cartesianProduct(levelSets);
 
   // Reconstruct existing participants' joint cells and count them WITHIN this
   // stratum, so allocation balances the actual factorial cells per stratum.
+  // Participants sitting in a cell that is no longer active (a level outside
+  // the study's subset) are counted under their own key, which is simply never
+  // a candidate — so they neither block nor skew the active cells.
   const cellCounts = new Map<string, number>();
   for (const c of cells) cellCounts.set(cellKey(c), 0);
 
@@ -139,11 +231,8 @@ export async function assignParticipant(
     }
   }
 
-  // Choose the least-filled cell; break ties uniformly at random.
-  const counts = cells.map((c) => cellCounts.get(cellKey(c)) ?? 0);
-  const min = Math.min(...counts);
-  const candidates = cells.filter((c) => (cellCounts.get(cellKey(c)) ?? 0) === min);
-  const chosen = candidates[Math.floor(Math.random() * candidates.length)];
+  // Choose the least-filled active cell; break ties uniformly at random.
+  const chosen = pickLeastFilledCell(cells, cellCounts);
 
   const assignments = dims.map((d, i) => ({ dimensionId: d.id, level: chosen[i] }));
 
@@ -164,15 +253,17 @@ export async function assignParticipant(
 }
 
 /**
- * Check balance across treatment cells for a study.
+ * Check balance across treatment cells for a study. Only the study's ACTIVE
+ * levels (resolveLevels) are reported; assignments to inactive levels are
+ * ignored so a narrowed design is not flagged as imbalanced by legacy cells.
  */
 export async function checkBalance(studyId: string) {
   const supabase = await createSupabaseServiceClient();
 
-  // Get study dimensions
+  // Get study dimensions (+ per-study subset).
   const { data: studyDims } = await supabase
     .from("treatment_study_dimensions")
-    .select("dimension_id, treatment_dimensions(name, levels)")
+    .select("dimension_id, active_levels, treatment_dimensions(name, levels)")
     .eq("study_id", studyId);
 
   if (!studyDims) return { balanced: true, cells: [] };
@@ -186,7 +277,10 @@ export async function checkBalance(studyId: string) {
       .select("level")
       .eq("dimension_id", sd.dimension_id);
 
-    const levels = dim.levels;
+    const levels = resolveLevels(
+      { id: sd.dimension_id, name: dim.name, levels: dim.levels },
+      sd.active_levels as string[] | null
+    );
     const counts: Record<string, number> = {};
     for (const l of levels) counts[l] = 0;
     for (const a of assignments || []) {

@@ -46,8 +46,13 @@ export default async function ResearchPage() {
           </p>
 
           {/* Enrollment + logging completeness */}
-          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4 mb-8">
+          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-5 mb-8">
             <Stat label="Enrolled" value={`${health.study.current_sample_size}${health.study.target_sample_size ? ` / ${health.study.target_sample_size}` : ""}`} />
+            <Stat
+              label="Enrollment failures (7d)"
+              value={health.enrollment_failures_7d}
+              tone={health.enrollment_failures_7d > 0 ? "alert" : "default"}
+            />
             <Stat label="With privacy events" value={`${health.logging.with_privacy_events} (${pct(health.logging.with_privacy_events, health.logging.participants)})`} />
             <Stat label="With snapshots" value={`${health.logging.with_snapshots} (${pct(health.logging.with_snapshots, health.logging.participants)})`} />
             <Stat label="Events (24h)" value={health.logging.events_last_24h} />
@@ -146,11 +151,27 @@ export default async function ResearchPage() {
   );
 }
 
-function Stat({ label, value }: { label: string; value: string | number }) {
+interface StatProps {
+  label: string;
+  value: string | number;
+  /** "alert" highlights a value that needs attention (e.g. enrollment failures > 0). */
+  tone?: "default" | "alert";
+}
+
+function Stat({ label, value, tone = "default" }: StatProps) {
+  const alert = tone === "alert";
   return (
-    <div className="rounded-lg border border-gray-200 bg-white p-3">
-      <div className="text-xl font-bold text-gray-900">{value}</div>
-      <div className="text-[11px] text-gray-500">{label}</div>
+    <div
+      className={
+        alert
+          ? "rounded-lg border border-red-300 bg-red-50 p-3"
+          : "rounded-lg border border-gray-200 bg-white p-3"
+      }
+    >
+      <div className={alert ? "text-xl font-bold text-red-700" : "text-xl font-bold text-gray-900"}>
+        {value}
+      </div>
+      <div className={alert ? "text-[11px] text-red-600" : "text-[11px] text-gray-500"}>{label}</div>
     </div>
   );
 }
