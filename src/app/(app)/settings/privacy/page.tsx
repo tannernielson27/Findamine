@@ -16,17 +16,27 @@ export default function PrivacySettingsPage() {
   const [treatment, setTreatment] = useState<PrivacyTreatment>("moderate");
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
-  const [ageBand, setAgeBand] = useState("intermediate");
+  const [ageBand] = useState("intermediate");
+
+  // ── Friction manipulation (prospectus Factor B) ─────────────────
+  // high: controls sit behind an extra "show controls" step, and protective
+  // (tightening) saves require a confirmation with mildly discouraging framing.
+  // low/unassigned: one prominent action, neutral labels — no extra steps.
+  const [friction, setFriction] = useState<"low" | "high" | null>(null);
+  const [controlsRevealed, setControlsRevealed] = useState(true);
+  const [confirmOpen, setConfirmOpen] = useState(false);
 
   // ── Research instrumentation (Task A3) ──────────────────────────
-  const openedAtRef = useRef<number>(Date.now());
+  // Refs are initialized to inert values and populated in effects (never call
+  // impure Date.now()/crypto during render).
+  const openedAtRef = useRef<number>(0);
   const originalRef = useRef<Record<string, VisibilityLevel>>({}); // last saved/loaded state
   const currentRef = useRef<Record<string, VisibilityLevel>>({});  // latest in-flight state
   const clickCountRef = useRef(0);
+  const abandonLoggedRef = useRef(false); // dedupe abandon across unmount + page-hide
   const treatmentRef = useRef<string>("moderate");
-  const sessionIdRef = useRef<string>(
-    typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : String(Date.now())
-  );
+  const frictionRef = useRef<string | null>(null);
+  const sessionIdRef = useRef<string>("");
 
   // Keep a ref mirror of visibility so the unmount handler sees the latest value.
   useEffect(() => {
@@ -34,6 +44,13 @@ export default function PrivacySettingsPage() {
   }, [visibility]);
 
   useEffect(() => {
+    // Stable per-visit session id, set in an effect rather than during render.
+    if (!sessionIdRef.current) {
+      sessionIdRef.current =
+        typeof crypto !== "undefined" && crypto.randomUUID
+          ? crypto.randomUUID()
+          : String(Date.now());
+    }
     fetch("/api/v1/auth/me")
       .then((r) => r.json())
       .then(async (data) => {
@@ -42,6 +59,15 @@ export default function PrivacySettingsPage() {
           const t = data.user.metadata?.privacy_treatment || "moderate";
           setTreatment(t);
           treatmentRef.current = t;
+
+          // Friction condition: high-friction participants must take one extra
+          // step before the controls render (each step is logged).
+          const f = data.user.metadata?.privacy_friction ?? null;
+          if (f === "low" || f === "high") {
+            setFriction(f);
+            frictionRef.current = f;
+            if (f === "high") setControlsRevealed(false);
+          }
 
           // Get existing visibility, else condition-aware defaults. For the
           // "neutral" default condition getDefaults returns {} → nothing is
@@ -59,18 +85,24 @@ export default function PrivacySettingsPage() {
             event_type: "privacy_view",
             page: "settings_privacy",
             session_id: sessionIdRef.current,
-            metadata: { treatment: t, index: computePrivacyIndex(loaded) },
+            metadata: { treatment: t, friction: f === "low" || f === "high" ? f : null, index: computePrivacyIndex(loaded) },
           });
         }
       })
       .catch(() => {});
   }, [ageBand]);
 
-  // On unmount, if the user changed settings but never saved, log abandonment.
+  // Log abandonment when the user leaves with unsaved edits. Covers SPA unmount
+  // AND hard exits (tab close, backgrounding) that unmount alone misses, and also
+  // captures the net-zero "fiddle then return to start" case (a reversal that
+  // ends without saving), which the old handler dropped.
   useEffect(() => {
-    return () => {
+    function logAbandonIfDirty() {
+      if (abandonLoggedRef.current) return;
       const deltas = diffVisibility(originalRef.current, currentRef.current);
-      if (deltas.length === 0) return;
+      const netZeroFiddle = deltas.length === 0 && clickCountRef.current > 0;
+      if (deltas.length === 0 && !netZeroFiddle) return; // truly untouched → nothing to log
+      abandonLoggedRef.current = true;
       logPrivacyEvent({
         event_type: "privacy_abandon",
         page: "settings_privacy",
@@ -81,65 +113,124 @@ export default function PrivacySettingsPage() {
         session_id: sessionIdRef.current,
         metadata: {
           treatment: treatmentRef.current,
+          friction: frictionRef.current,
           deltas,
           direction: classifyChange(deltas),
+          reversed: netZeroFiddle, // fiddled, then left at the starting point
         },
       });
+    }
+    const onPageHide = () => logAbandonIfDirty();
+    const onVisibility = () => {
+      if (document.visibilityState === "hidden") logAbandonIfDirty();
+    };
+    window.addEventListener("pagehide", onPageHide);
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => {
+      window.removeEventListener("pagehide", onPageHide);
+      document.removeEventListener("visibilitychange", onVisibility);
+      logAbandonIfDirty(); // SPA navigation away (unmount)
     };
   }, []);
 
-  async function handleSave() {
+  // Friction-funnel steps ride the privacy_field_touch event type (allowed by
+  // the events endpoint) with a distinguishing scope, so the initiated→completed
+  // flow — and where high-friction participants drop out — is reconstructable.
+  function logFrictionStep(step: string) {
+    logPrivacyEvent({
+      event_type: "privacy_field_touch",
+      page: "settings_privacy",
+      session_id: sessionIdRef.current,
+      metadata: { treatment: treatmentRef.current, friction: frictionRef.current, scope: `friction:${step}`, fields: [] },
+    });
+  }
+
+  function revealControls() {
+    clickCountRef.current += 1;
+    setControlsRevealed(true);
+    logFrictionStep("gate_opened");
+  }
+
+  /** Entry point for the Save button — may interpose the high-friction confirm. */
+  function handleSave() {
+    const direction = classifyChange(diffVisibility(originalRef.current, currentRef.current));
+    if (friction === "high" && (direction === "tighten" || direction === "mixed")) {
+      clickCountRef.current += 1;
+      setConfirmOpen(true);
+      logFrictionStep("confirm_shown");
+      return;
+    }
+    void doSave();
+  }
+
+  function confirmCancel() {
+    clickCountRef.current += 1;
+    setConfirmOpen(false);
+    logFrictionStep("confirm_cancelled");
+  }
+
+  function confirmAccept() {
+    clickCountRef.current += 1;
+    setConfirmOpen(false);
+    logFrictionStep("confirm_accepted");
+    void doSave();
+  }
+
+  async function doSave() {
     setSaving(true);
 
-    const oldValue = originalRef.current;
-    const deltas = diffVisibility(oldValue, visibility);
-    const direction = classifyChange(deltas);
-
+    // The authoritative privacy_change event + index snapshot are written
+    // server-side by the profile PUT (with condition context), so they can never
+    // be lost to best-effort client telemetry. We pass the interaction timing the
+    // server can't observe (how long the surface was open, how many clicks).
     await fetch("/api/v1/auth/profile", {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ profile_visibility: visibility }),
-    });
-
-    // Log the privacy change (primary research outcome). A save with no net delta
-    // but prior clicks is a reversal (fiddled and ended where they started).
-    logPrivacyEvent({
-      event_type: "privacy_change",
-      page: "settings_privacy",
-      old_value: oldValue,
-      new_value: visibility,
-      duration_ms: Date.now() - openedAtRef.current,
-      click_count: clickCountRef.current,
-      session_id: sessionIdRef.current,
-      metadata: {
-        treatment: treatmentRef.current,
-        deltas,
-        direction,
-        reversed: deltas.length === 0 && clickCountRef.current > 0,
-        index_before: computePrivacyIndex(oldValue),
-        index_after: computePrivacyIndex(visibility),
-      },
+      body: JSON.stringify({
+        profile_visibility: visibility,
+        privacy_meta: {
+          duration_ms: Date.now() - openedAtRef.current,
+          click_count: clickCountRef.current,
+          session_id: sessionIdRef.current,
+        },
+      }),
     });
 
     // Reset the baseline so subsequent saves diff from this saved state.
     originalRef.current = visibility;
     openedAtRef.current = Date.now();
     clickCountRef.current = 0;
+    abandonLoggedRef.current = false;
 
     setSaving(false);
     setSaved(true);
     setTimeout(() => setSaved(false), 2000);
   }
 
+  // Emit a lightweight per-interaction "touch" so the intra-session toggle trail
+  // (and true reversals) can be reconstructed, not just the net old→new diff.
+  function logFieldTouch(scope: string, level: VisibilityLevel, fields: string[]) {
+    logPrivacyEvent({
+      event_type: "privacy_field_touch",
+      page: "settings_privacy",
+      session_id: sessionIdRef.current,
+      metadata: { treatment: treatmentRef.current, scope, level, fields },
+    });
+  }
+
   function setFieldVisibility(key: string, level: VisibilityLevel) {
     clickCountRef.current += 1;
+    abandonLoggedRef.current = false; // new activity → allow a fresh abandon log
+    logFieldTouch("field", level, [key]);
     setVisibility((prev) => ({ ...prev, [key]: level }));
     setSaved(false);
   }
 
   function setCategoryVisibility(category: string, level: VisibilityLevel) {
     clickCountRef.current += 1;
+    abandonLoggedRef.current = false;
     const fields = PROFILE_FIELDS.filter((f) => f.category === category);
+    logFieldTouch(`category:${category}`, level, fields.map((f) => f.key));
     setVisibility((prev) => {
       const next = { ...prev };
       fields.forEach((f) => { next[f.key] = level; });
@@ -150,6 +241,8 @@ export default function PrivacySettingsPage() {
 
   function setMasterVisibility(level: VisibilityLevel) {
     clickCountRef.current += 1;
+    abandonLoggedRef.current = false;
+    logFieldTouch("master", level, PROFILE_FIELDS.map((f) => f.key));
     setVisibility((prev) => {
       const next = { ...prev };
       PROFILE_FIELDS.forEach((f) => { next[f.key] = level; });
@@ -157,6 +250,11 @@ export default function PrivacySettingsPage() {
     });
     setSaved(false);
   }
+
+  // Fields with no selection yet (only possible under the neutral default,
+  // where getDefaults returns an empty map). Saving is blocked until complete
+  // so the first logged choice is a full, deliberate configuration.
+  const unsetCount = PROFILE_FIELDS.filter((f) => !visibility[f.key]).length;
 
   return (
     <main className="mx-auto max-w-2xl px-4 py-4">
@@ -170,16 +268,35 @@ export default function PrivacySettingsPage() {
         <p className="text-xs text-sky-800">
           <strong>Why privacy matters:</strong> Your personal information belongs to you.
           These settings let you decide who sees what. There are no wrong answers — just
-          think about what you're comfortable sharing with different groups of people.
+          think about what you&apos;re comfortable sharing with different groups of people.
         </p>
       </div>
 
+      {/* HIGH-friction gate: controls stay collapsed behind one more step. */}
+      {!controlsRevealed && (
+        <div className="rounded-lg border border-gray-200 bg-white p-4 mb-6">
+          <p className="text-sm text-gray-700 mb-1">
+            Your profile is currently using your saved sharing preferences.
+          </p>
+          <p className="text-xs text-gray-500 mb-3">
+            Most explorers keep the standard settings — sharing helps friends
+            find you and keeps your crew growing.
+          </p>
+          <button
+            onClick={revealControls}
+            className="rounded-lg border border-gray-300 px-4 py-2 text-xs font-medium text-gray-600 hover:bg-gray-50 transition"
+          >
+            Show advanced privacy controls
+          </button>
+        </div>
+      )}
+
       {/* SIMPLE treatment: one master toggle */}
-      {treatment === "simple" && (
+      {controlsRevealed && treatment === "simple" && (
         <div className="space-y-3 mb-6">
           <p className="text-sm font-medium text-gray-700">Who can see your profile?</p>
-          <div className="grid grid-cols-3 gap-2">
-            {(["nobody", "team", "everyone"] as VisibilityLevel[]).map((level) => {
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+            {VISIBILITY_LEVELS.map((level) => {
               const info = VISIBILITY_LABELS[level];
               const isActive = PROFILE_FIELDS.every((f) => visibility[f.key] === level);
               return (
@@ -192,7 +309,7 @@ export default function PrivacySettingsPage() {
                 >
                   <span className="text-2xl block mb-1">{info.icon}</span>
                   <span className="text-xs font-medium text-gray-900">{info.label}</span>
-                  <p className="text-[10px] text-gray-500 mt-0.5">{info.description}</p>
+                  <p className="text-xs text-gray-600 mt-0.5">{info.description}</p>
                 </button>
               );
             })}
@@ -201,30 +318,34 @@ export default function PrivacySettingsPage() {
       )}
 
       {/* MODERATE treatment: 3 categories × 3 levels */}
-      {treatment === "moderate" && (
+      {controlsRevealed && treatment === "moderate" && (
         <div className="space-y-4 mb-6">
           {CATEGORIES.map((cat) => {
-            // Determine current category level (most common among fields)
-            const fieldLevels = cat.fields.map((f) => visibility[f.key] || "nobody");
-            const currentLevel = fieldLevels[0]; // simplified — use first field's level
+            // Highlight a level only when every field in the category shares it;
+            // if the fields disagree (mixed), highlight nothing rather than
+            // misrepresenting the state with the first field's value.
+            const fieldLevels = cat.fields.map((f) => visibility[f.key]);
+            const allSame = fieldLevels.every((l) => l === fieldLevels[0]);
+            const currentLevel = allSame ? fieldLevels[0] : null;
 
             return (
               <div key={cat.key} className="rounded-lg border border-gray-200 p-3">
                 <p className="text-sm font-medium text-gray-900 mb-1">{cat.label}</p>
-                <p className="text-[11px] text-gray-500 mb-2">
+                <p className="text-xs text-gray-600 mb-2">
                   {cat.fields.map((f) => f.label).join(", ")}
                 </p>
                 <div className="flex gap-1.5">
-                  {(["nobody", "team", "everyone"] as VisibilityLevel[]).map((level) => {
+                  {VISIBILITY_LEVELS.map((level) => {
                     const info = VISIBILITY_LABELS[level];
                     return (
                       <button
                         key={level}
                         onClick={() => setCategoryVisibility(cat.key, level)}
-                        className={`flex-1 rounded px-2 py-1.5 text-[11px] transition ${
+                        aria-pressed={currentLevel === level}
+                        className={`flex-1 rounded px-2 py-2 text-xs transition ${
                           currentLevel === level
                             ? "bg-sky-100 text-sky-800 border border-sky-300"
-                            : "bg-gray-50 text-gray-600 border border-gray-200 hover:bg-gray-100"
+                            : "bg-gray-50 text-gray-700 border border-gray-200 hover:bg-gray-100"
                         }`}
                       >
                         {info.icon} {info.label}
@@ -239,14 +360,14 @@ export default function PrivacySettingsPage() {
       )}
 
       {/* COMPLEX treatment: per-field × 4 levels */}
-      {treatment === "complex" && (
+      {controlsRevealed && treatment === "complex" && (
         <div className="space-y-2 mb-6">
           {PROFILE_FIELDS.map((field) => (
             <div key={field.key} className="rounded-lg border border-gray-200 p-3">
               <div className="flex items-start justify-between mb-1">
                 <div>
-                  <p className="text-xs font-medium text-gray-900">{field.label}</p>
-                  <p className="text-[10px] text-gray-500">{field.description}</p>
+                  <p className="text-sm font-medium text-gray-900">{field.label}</p>
+                  <p className="text-xs text-gray-600">{field.description}</p>
                 </div>
               </div>
               <div className="flex gap-1 mt-1.5">
@@ -256,10 +377,11 @@ export default function PrivacySettingsPage() {
                     <button
                       key={level}
                       onClick={() => setFieldVisibility(field.key, level)}
-                      className={`flex-1 rounded px-1.5 py-1 text-[10px] transition ${
+                      aria-pressed={visibility[field.key] === level}
+                      className={`flex-1 rounded px-1.5 py-1.5 text-xs transition ${
                         visibility[field.key] === level
                           ? "bg-sky-100 text-sky-800 border border-sky-300"
-                          : "bg-gray-50 text-gray-500 border border-gray-200 hover:bg-gray-100"
+                          : "bg-gray-50 text-gray-700 border border-gray-200 hover:bg-gray-100"
                       }`}
                     >
                       {info.icon} {info.label}
@@ -267,27 +389,79 @@ export default function PrivacySettingsPage() {
                   );
                 })}
               </div>
-              <p className="text-[9px] text-gray-400 mt-1 italic">{field.educationalTip}</p>
+              <p className="text-xs text-gray-600 mt-1 italic">{field.educationalTip}</p>
             </div>
           ))}
         </div>
       )}
 
-      {/* Save button */}
-      <div className="flex items-center gap-3">
-        <button
-          onClick={handleSave}
-          disabled={saving}
-          className="bg-brand text-white rounded-lg hover:bg-brand-dark transition-colors px-6 py-2 text-sm font-medium disabled:opacity-50"
-        >
-          {saving ? "Saving..." : "Save Privacy Settings"}
-        </button>
-        {saved && <span className="text-xs text-green-600">Saved!</span>}
-      </div>
+      {/* Save button — a NEUTRAL-default participant starts with nothing selected
+          and must make a complete first choice before saving (Workstream A / A10). */}
+      {controlsRevealed && (
+        <>
+          {unsetCount > 0 && (
+            <div className="rounded-lg bg-amber-50 border border-amber-200 p-3 mb-3">
+              <p className="text-xs text-amber-800">
+                Choose a setting for every item before saving — {unsetCount}{" "}
+                {unsetCount === 1 ? "item still needs" : "items still need"} a choice.
+              </p>
+            </div>
+          )}
+          <div className="flex items-center gap-3">
+            <button
+              onClick={handleSave}
+              disabled={saving || unsetCount > 0}
+              className="bg-brand text-white rounded-lg hover:bg-brand-dark transition-colors px-6 py-2 text-sm font-medium disabled:opacity-50"
+            >
+              {saving ? "Saving..." : "Save Privacy Settings"}
+            </button>
+            {saved && <span className="text-xs text-green-600">Saved!</span>}
+          </div>
+        </>
+      )}
 
-      <p className="text-[10px] text-gray-400 mt-3">
+      <p className="text-xs text-gray-500 mt-3">
         You can change these settings anytime from Settings → Privacy.
       </p>
+
+      {/* HIGH-friction confirmation on protective changes (extra step + framing
+          that mildly discourages restriction — disclosed at debrief). */}
+      {confirmOpen && (
+        <div
+          className="fixed inset-0 z-[95] flex items-center justify-center bg-gray-900/50 p-4"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="friction-confirm-title"
+        >
+          <div className="w-full max-w-sm rounded-2xl bg-white shadow-xl p-5">
+            <h2 id="friction-confirm-title" className="text-base font-bold text-gray-900 mb-2">
+              Hide this information?
+            </h2>
+            <p className="text-sm text-gray-600 mb-1">
+              Hiding parts of your profile can make it harder for friends and
+              classmates to find you.
+            </p>
+            <p className="text-sm text-gray-600 mb-4">
+              Explorers with visible profiles tend to grow their crew — and crew
+              activity earns you points.
+            </p>
+            <div className="flex flex-col gap-2">
+              <button
+                onClick={confirmCancel}
+                className="w-full rounded-xl bg-brand px-4 py-2.5 text-sm font-semibold text-white hover:bg-brand-dark transition"
+              >
+                Keep sharing
+              </button>
+              <button
+                onClick={confirmAccept}
+                className="w-full rounded-xl border border-gray-200 px-4 py-2.5 text-xs font-medium text-gray-500 hover:bg-gray-50 transition"
+              >
+                Hide it anyway
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </main>
   );
 }

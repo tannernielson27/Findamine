@@ -39,18 +39,25 @@ export async function GET(request: NextRequest) {
     return Response.json({ participants: 0, snapshots: 0 });
   }
 
-  // Current visibility for each participant.
+  // Current visibility + assigned condition for each participant.
   const { data: users } = await supabase
     .from("users")
-    .select("id, profile_visibility")
+    .select("id, profile_visibility, metadata")
     .in("id", userIds);
 
-  const rows = (users || []).map((u) => ({
-    user_id: u.id,
-    index_value: computePrivacyIndex((u.profile_visibility || {}) as Record<string, string>),
-    source: "scheduled" as const,
-    visibility: u.profile_visibility || {},
-  }));
+  const rows = (users || []).map((u) => {
+    const visibility = (u.profile_visibility || {}) as Record<string, string>;
+    const metadata = (u.metadata || {}) as Record<string, unknown>;
+    return {
+      user_id: u.id,
+      index_value: computePrivacyIndex(visibility),
+      source: "scheduled" as const,
+      visibility,
+      treatment: (metadata.privacy_treatment as string) ?? null,
+      privacy_default: (metadata.privacy_default as string) ?? null,
+      unset: Object.keys(visibility).length === 0,
+    };
+  });
 
   let written = 0;
   // Insert in chunks to stay well under payload limits.

@@ -20,14 +20,17 @@ import { recordPrivacyIndexSnapshot } from "@/lib/services/privacy-snapshots";
 import { createDueDeliveriesForUser } from "@/lib/services/survey-delivery";
 
 export type PrivacyDefaultCondition = "private" | "neutral" | "public";
+export type PrivacyFrictionCondition = "low" | "high";
 
 const COMPLEXITY_DIMENSION = "privacy_control_complexity";
 const DEFAULT_DIMENSION = "privacy_default";
+const FRICTION_DIMENSION = "privacy_friction";
 
 export interface EnrollmentResult {
   enrolled: boolean;
   treatment?: string;
   defaultCondition?: PrivacyDefaultCondition;
+  frictionCondition?: PrivacyFrictionCondition;
 }
 
 /**
@@ -68,6 +71,17 @@ export function deriveDefaultCondition(
 }
 
 /**
+ * Derive the privacy_friction condition (prospectus Factor B) from named
+ * dimension assignments. Pure.
+ */
+export function deriveFrictionCondition(
+  assignments: { dimensionName: string; level: string }[]
+): PrivacyFrictionCondition | undefined {
+  const level = assignments.find((a) => a.dimensionName === FRICTION_DIMENSION)?.level;
+  return level === "low" || level === "high" ? level : undefined;
+}
+
+/**
  * Auto-enroll a user into the active auto-enroll study. Idempotent + safe.
  */
 export async function enrollParticipant(userId: string): Promise<EnrollmentResult> {
@@ -92,6 +106,23 @@ export async function enrollParticipant(userId: string): Promise<EnrollmentResul
       .eq("user_id", userId)
       .maybeSingle();
     if (existing) return { enrolled: false };
+
+    // 2b. Research-consent gate (IRB). Never assign a condition, set defaults,
+    // snapshot, or collect any study data until the participant has granted
+    // informed research consent. Because children cannot self-grant a 'research'
+    // consent (see the consent route), gating here also excludes them from the
+    // adults-only study. Consent is captured by the ConsentGate UI; the (app)
+    // layout re-runs this enrollment on the next load once consent exists.
+    const { data: consent } = await supabase
+      .from("consent_records")
+      .select("id")
+      .eq("user_id", userId)
+      .eq("consent_type", "research")
+      .eq("granted", true)
+      .is("revoked_at", null)
+      .limit(1)
+      .maybeSingle();
+    if (!consent) return { enrolled: false };
 
     // 3. Study dimensions (id → name).
     const { data: studyDims } = await supabase
@@ -119,8 +150,11 @@ export async function enrollParticipant(userId: string): Promise<EnrollmentResul
       dimensionName: idToName.get(a.dimensionId) ?? "",
       level: a.level,
     }));
-    const treatment = deriveTreatment(named);
+    // Complexity is held constant at "moderate" when it isn't a crossed factor
+    // (migration 050); the friction dimension is the prospectus's Factor B.
+    const treatment = deriveTreatment(named) ?? "moderate";
     const defaultCondition = deriveDefaultCondition(named);
+    const frictionCondition = deriveFrictionCondition(named);
 
     // 6. Current user state (age band + whether visibility already set).
     const { data: userRow } = await supabase
@@ -143,6 +177,7 @@ export async function enrollParticipant(userId: string): Promise<EnrollmentResul
         ...(userRow?.metadata || {}),
         privacy_treatment: treatment,
         privacy_default: defaultCondition ?? null,
+        privacy_friction: frictionCondition ?? null,
       },
     };
     if (!hasVisibility) {
@@ -150,8 +185,13 @@ export async function enrollParticipant(userId: string): Promise<EnrollmentResul
     }
     await supabase.from("users").update(updates).eq("id", userId);
 
-    // t0 of the privacy-index trajectory.
-    await recordPrivacyIndexSnapshot(userId, initialVisibility, "enrollment");
+    // t0 of the privacy-index trajectory, stamped with the assigned condition. A
+    // neutral default yields an empty visibility map → recorded as unset (vs a
+    // public default, which is a real "everyone" choice at the same index 0).
+    await recordPrivacyIndexSnapshot(userId, initialVisibility, "enrollment", {
+      treatment,
+      privacyDefault: defaultCondition ?? null,
+    });
 
     // 8. Enroll + refresh sample size.
     await supabase
@@ -175,10 +215,15 @@ export async function enrollParticipant(userId: string): Promise<EnrollmentResul
     await trackEvent({
       userId,
       eventType: "study_enrolled",
-      payload: { study_id: study.id, treatment, default_condition: defaultCondition },
+      payload: {
+        study_id: study.id,
+        treatment,
+        default_condition: defaultCondition,
+        friction_condition: frictionCondition,
+      },
     });
 
-    return { enrolled: true, treatment: treatment ?? undefined, defaultCondition };
+    return { enrolled: true, treatment, defaultCondition, frictionCondition };
   } catch {
     // Enrollment must never break registration or render.
     return { enrolled: false };

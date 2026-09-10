@@ -3,6 +3,7 @@ import {
   computeInitialVisibility,
   deriveTreatment,
   deriveDefaultCondition,
+  deriveFrictionCondition,
 } from "@/lib/services/enrollment";
 import { PROFILE_FIELDS, getDefaults } from "@/lib/utils/privacy";
 
@@ -76,6 +77,27 @@ describe("deriveDefaultCondition", () => {
     expect(deriveDefaultCondition([])).toBeUndefined();
     expect(
       deriveDefaultCondition([{ dimensionName: "privacy_default", level: "bogus" }])
+    ).toBeUndefined();
+  });
+});
+
+describe("deriveFrictionCondition (prospectus Factor B)", () => {
+  it("returns the assigned low/high level", () => {
+    expect(
+      deriveFrictionCondition([{ dimensionName: "privacy_friction", level: "low" }])
+    ).toBe("low");
+    expect(
+      deriveFrictionCondition([
+        { dimensionName: "privacy_default", level: "public" },
+        { dimensionName: "privacy_friction", level: "high" },
+      ])
+    ).toBe("high");
+  });
+
+  it("returns undefined when absent or invalid", () => {
+    expect(deriveFrictionCondition([])).toBeUndefined();
+    expect(
+      deriveFrictionCondition([{ dimensionName: "privacy_friction", level: "medium" }])
     ).toBeUndefined();
   });
 });

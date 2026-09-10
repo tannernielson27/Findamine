@@ -4,11 +4,60 @@ import {
   canViewField,
   visibleFields,
   filterProfileForViewer,
+  filterFullProfileForViewer,
   PROFILE_FIELD_KEYS,
+  type FullProfile,
   type ViewerRelationship,
 } from "@/lib/utils/privacy";
 
 const RELATIONSHIPS: ViewerRelationship[] = ["self", "team", "class", "public"];
+
+const FULL_PROFILE: FullProfile = {
+  display_name: "Explorer",
+  avatar_url: "https://example.com/a.png",
+  real_name: "Pat Doe",
+  personality_scores: { personality: { openness: 4 } },
+  badges: [{ code: "first_find" }],
+  total_score: 420,
+  hunt_history: [{ hunt_id: "h1" }],
+  friends_list: [{ id: "u2" }],
+};
+
+describe("filterFullProfileForViewer (all 8 fields)", () => {
+  it("self sees everything regardless of settings", () => {
+    const allNobody = Object.fromEntries(PROFILE_FIELD_KEYS.map((k) => [k, "nobody"]));
+    expect(filterFullProfileForViewer(FULL_PROFILE, allNobody, "self")).toEqual(FULL_PROFILE);
+  });
+
+  it("nulls every field for a public viewer when all fields are 'nobody'", () => {
+    const allNobody = Object.fromEntries(PROFILE_FIELD_KEYS.map((k) => [k, "nobody"]));
+    const filtered = filterFullProfileForViewer(FULL_PROFILE, allNobody, "public");
+    for (const value of Object.values(filtered)) expect(value).toBeNull();
+  });
+
+  it("filters per field: team-only fields hidden from class, visible to team", () => {
+    const vis = { real_name: "team", total_score: "class", friends_list: "nobody" };
+    const forClass = filterFullProfileForViewer(FULL_PROFILE, vis, "class");
+    expect(forClass.real_name).toBeNull();
+    expect(forClass.total_score).toBe(420);
+    expect(forClass.friends_list).toBeNull();
+
+    const forTeam = filterFullProfileForViewer(FULL_PROFILE, vis, "team");
+    expect(forTeam.real_name).toBe("Pat Doe");
+  });
+
+  it("maps the 'avatar' setting to avatar_url", () => {
+    const filtered = filterFullProfileForViewer(FULL_PROFILE, { avatar: "nobody" }, "team");
+    expect(filtered.avatar_url).toBeNull();
+    expect(filtered.display_name).toBe("Explorer"); // unset → everyone
+  });
+
+  it("never mutates the input", () => {
+    const input = { ...FULL_PROFILE };
+    filterFullProfileForViewer(input, { total_score: "nobody" }, "public");
+    expect(input.total_score).toBe(420);
+  });
+});
 
 describe("canView (ordinal scale nobody<team<class<everyone)", () => {
   it("self sees everything", () => {

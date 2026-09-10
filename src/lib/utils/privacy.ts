@@ -206,6 +206,56 @@ export function filterProfileForViewer(
 
 export type ViewerRelationship = "self" | "team" | "class" | "public";
 
+/**
+ * A fully-assembled profile payload keyed by the 8 logical profile fields.
+ * Assembly (joins across badges/sessions/friends tables) happens at the call
+ * site; this type is what filterFullProfileForViewer enforces over.
+ */
+export interface FullProfile {
+  display_name: string | null;
+  avatar_url: string | null;
+  real_name: string | null;
+  personality_scores: Record<string, unknown> | null;
+  badges: unknown[] | null;
+  total_score: number | null;
+  hunt_history: unknown[] | null;
+  friends_list: unknown[] | null;
+}
+
+/** Maps each logical field key to its FullProfile property. */
+const FIELD_TO_PROP: Record<string, keyof FullProfile> = {
+  display_name: "display_name",
+  avatar: "avatar_url",
+  real_name: "real_name",
+  personality_scores: "personality_scores",
+  badges: "badges",
+  total_score: "total_score",
+  hunt_history: "hunt_history",
+  friends_list: "friends_list",
+};
+
+/**
+ * Enforce all 8 profile fields at once: hidden fields come back as null.
+ * Returns a new object; never mutates the input. This is the single filter
+ * every "view another user's profile" surface must route through so that
+ * restricting a field provably removes it from responses (Workstream A / A5).
+ */
+export function filterFullProfileForViewer(
+  profile: FullProfile,
+  visibility: Record<string, string> | undefined,
+  viewerRelationship: ViewerRelationship
+): FullProfile {
+  if (viewerRelationship === "self") return { ...profile };
+
+  const result = { ...profile };
+  for (const [fieldKey, prop] of Object.entries(FIELD_TO_PROP)) {
+    if (!canViewField(visibility, viewerRelationship, fieldKey)) {
+      result[prop] = null as never;
+    }
+  }
+  return result;
+}
+
 /** The visibility key used by avatar settings (the field key is "avatar", the column is avatar_url). */
 export const PROFILE_FIELD_KEYS: string[] = PROFILE_FIELDS.map((f) => f.key);
 

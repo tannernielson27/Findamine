@@ -1,7 +1,6 @@
 import { NextRequest } from "next/server";
 import { createSupabaseServiceClient } from "@/lib/supabase/server";
 import { getAuthUser, errorResponse, ApiError } from "@/lib/utils/api-auth";
-import { recordPrivacyIndexSnapshot } from "@/lib/services/privacy-snapshots";
 
 // Log privacy-related events (Studies 1-3)
 export async function POST(request: NextRequest) {
@@ -42,14 +41,11 @@ export async function POST(request: NextRequest) {
 
     if (error) throw new ApiError(500, error.message);
 
-    // Record a "change" point on the privacy-index trajectory.
-    if (body.event_type === "privacy_change" && body.new_value) {
-      await recordPrivacyIndexSnapshot(
-        user.id,
-        body.new_value as Record<string, string>,
-        "change"
-      );
-    }
+    // Note: the authoritative privacy_change event + index snapshot (with
+    // condition context) are written server-side by PUT /api/v1/auth/profile.
+    // This endpoint now handles the ephemeral interaction signals only
+    // (privacy_view, privacy_abandon, privacy_field_touch), so it no longer
+    // snapshots — that avoids double-counting the trajectory.
 
     return Response.json({ event: data }, { status: 201 });
   } catch (error) {
