@@ -30,6 +30,35 @@ export function isDisclosureEligible(
   return DISCLOSURE_GATED_FIELDS.every((field) => canViewField(visibility, "class", field));
 }
 
+/**
+ * Randomizable switches for storyline S3 (migration 059). Levels arrive in
+ * users.metadata as dim_referral_gate / dim_forfeit_notice when the dimensions
+ * are linked to a study; when absent, behavior is today's (gated + shown).
+ */
+export type ReferralGate = "gated" | "ungated";
+export type ForfeitNotice = "shown" | "silent";
+export interface ReferralSwitches {
+  referral_gate: ReferralGate;
+  forfeit_notice: ForfeitNotice;
+}
+
+export const REFERRAL_SWITCH_DEFAULTS: ReferralSwitches = {
+  referral_gate: "gated",
+  forfeit_notice: "shown",
+};
+
+/** Read the S3 switches from a user's metadata, falling back to defaults. Pure. */
+export function resolveReferralSwitches(
+  meta: Record<string, unknown> | null | undefined
+): ReferralSwitches {
+  const gate = meta?.dim_referral_gate;
+  const notice = meta?.dim_forfeit_notice;
+  return {
+    referral_gate: gate === "ungated" ? "ungated" : "gated",
+    forfeit_notice: notice === "silent" ? "silent" : "shown",
+  };
+}
+
 /** Points a recruiter earns from a minion's score. Pure + testable. */
 export function computeReferralPoints(
   basePoints: number,
@@ -171,15 +200,33 @@ export async function awardReferralPoints(
     // show the recruiter exactly what their privacy settings cost them.
     const { data: recruiter } = await supabase
       .from("users")
-      .select("profile_visibility")
+      .select("profile_visibility, metadata")
       .eq("id", link.recruiter_id)
       .maybeSingle();
 
-    if (!isDisclosureEligible(recruiter?.profile_visibility as Record<string, string> | undefined)) {
+    const eligible = isDisclosureEligible(
+      recruiter?.profile_visibility as Record<string, string> | undefined
+    );
+    const switches = resolveReferralSwitches(
+      recruiter?.metadata as Record<string, unknown> | undefined
+    );
+    const base = {
+      amount,
+      minion_id: minionUserId,
+      source_id: sourceId,
+      hunt_id: huntId,
+      eligible,
+      ...switches,
+    };
+
+    // Under the gated switch a hidden recruiter forfeits (logged, not paid).
+    // Under ungated the bonus is always paid, and the event records what the
+    // gate would have done so the analysis can compare the two arms.
+    if (switches.referral_gate === "gated" && !eligible) {
       await trackEvent({
         userId: link.recruiter_id,
         eventType: "referral_bonus_forfeited",
-        payload: { amount, minion_id: minionUserId, source_id: sourceId, hunt_id: huntId },
+        payload: base,
       });
       return;
     }
@@ -191,6 +238,12 @@ export async function awardReferralPoints(
       source_id: sourceId,
       hunt_id: huntId,
       description: `Referral bonus from a minion's score (+${amount})`,
+    });
+
+    await trackEvent({
+      userId: link.recruiter_id,
+      eventType: "referral_bonus_paid",
+      payload: { ...base, would_have_forfeited: !eligible },
     });
   } catch {
     // never block the minion's own scoring flow

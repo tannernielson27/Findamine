@@ -5,6 +5,8 @@ import {
   isDisclosureEligible,
   DISCLOSURE_GATED_FIELDS,
   REFERRAL_FRACTION,
+  resolveReferralSwitches,
+  REFERRAL_SWITCH_DEFAULTS,
 } from "@/lib/services/referral";
 
 describe("computeReferralPoints", () => {
@@ -62,5 +64,36 @@ describe("isDisclosureEligible (referral disclosure gate)", () => {
 
   it("ignores non-gated fields", () => {
     expect(isDisclosureEligible({ real_name: "nobody", friends_list: "nobody" })).toBe(true);
+  });
+});
+
+describe("resolveReferralSwitches (storyline S3, migration 059)", () => {
+  it("defaults to today's behavior when nothing is assigned", () => {
+    expect(resolveReferralSwitches(undefined)).toEqual(REFERRAL_SWITCH_DEFAULTS);
+    expect(resolveReferralSwitches(null)).toEqual({ referral_gate: "gated", forfeit_notice: "shown" });
+    expect(resolveReferralSwitches({})).toEqual({ referral_gate: "gated", forfeit_notice: "shown" });
+  });
+
+  it("reads assigned levels from dim_* metadata keys", () => {
+    expect(
+      resolveReferralSwitches({ dim_referral_gate: "ungated", dim_forfeit_notice: "silent" })
+    ).toEqual({ referral_gate: "ungated", forfeit_notice: "silent" });
+  });
+
+  it("treats unknown or malformed levels as the default", () => {
+    expect(
+      resolveReferralSwitches({ dim_referral_gate: "open", dim_forfeit_notice: 42 })
+    ).toEqual({ referral_gate: "gated", forfeit_notice: "shown" });
+  });
+
+  it("is independent per switch", () => {
+    expect(resolveReferralSwitches({ dim_referral_gate: "ungated" })).toEqual({
+      referral_gate: "ungated",
+      forfeit_notice: "shown",
+    });
+    expect(resolveReferralSwitches({ dim_forfeit_notice: "silent" })).toEqual({
+      referral_gate: "gated",
+      forfeit_notice: "silent",
+    });
   });
 });

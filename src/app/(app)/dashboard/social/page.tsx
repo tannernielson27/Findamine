@@ -38,6 +38,8 @@ interface ReferralInfo {
   minions: ReferralPerson[];
   recruiter: ReferralPerson | null;
   recent_earnings: ReferralEarning[];
+  /** Storyline S3: "silent" omits the gate fields below entirely. */
+  forfeit_notice?: "shown" | "silent";
   disclosure_eligible?: boolean;
   forfeited_points?: number;
 }
@@ -262,8 +264,9 @@ export default function SocialPage() {
           </section>
 
           {/* Disclosure gate — hidden profiles don't collect crew bonuses. The
-              cost of privacy is shown, not just applied (prospectus §3.2). */}
-          {referral && referral.disclosure_eligible === false && (
+              cost of privacy is shown, not just applied (prospectus §3.2) —
+              unless the participant is in the S3 "silent" arm. */}
+          {referral && referral.forfeit_notice !== "silent" && referral.disclosure_eligible === false && (
             <section className="rounded-2xl border border-[var(--color-warning)]/40 bg-[var(--color-warning)]/10 p-4 mb-6">
               <p className="text-sm font-medium text-themed-text mb-1">
                 Your crew bonuses are paused

@@ -2,7 +2,13 @@ import { NextRequest } from "next/server";
 import { createSupabaseServiceClient } from "@/lib/supabase/server";
 import { getAuthUser, errorResponse, ApiError } from "@/lib/utils/api-auth";
 import { socialLimiter } from "@/lib/utils/rate-limit";
-import { getOrCreateReferralCode, redeemReferral, isDisclosureEligible } from "@/lib/services/referral";
+import {
+  getOrCreateReferralCode,
+  redeemReferral,
+  isDisclosureEligible,
+  resolveReferralSwitches,
+} from "@/lib/services/referral";
+import { trackEvent } from "@/lib/utils/track-event";
 import { filterProfileForViewer } from "@/lib/utils/privacy";
 import { getViewerRelationships } from "@/lib/utils/viewer";
 
@@ -80,22 +86,39 @@ export async function GET(request: NextRequest) {
     // are tracked as behavioral events, not paid) — the felt cost of privacy.
     const { data: me } = await supabase
       .from("users")
-      .select("profile_visibility")
+      .select("profile_visibility, metadata")
       .eq("id", user.id)
       .maybeSingle();
     const disclosureEligible = isDisclosureEligible(
       me?.profile_visibility as Record<string, string> | undefined
     );
+    const switches = resolveReferralSwitches(me?.metadata as Record<string, unknown> | undefined);
 
-    const { data: forfeits } = await supabase
-      .from("behavioral_events")
-      .select("payload")
-      .eq("user_id", user.id)
-      .eq("event_type", "referral_bonus_forfeited");
-    const forfeitedPoints = (forfeits || []).reduce((sum, r) => {
-      const amount = (r.payload as { amount?: number } | null)?.amount;
-      return sum + (typeof amount === "number" ? amount : 0);
-    }, 0);
+    // Storyline S3 (migration 059): under `silent` the recruiter is never told
+    // what hiding has cost them. Forfeits are still LOGGED at award time; only
+    // the surfacing is suppressed, so the API omits the gate fields entirely.
+    let forfeitedPoints: number | undefined;
+    if (switches.forfeit_notice === "shown") {
+      const { data: forfeits } = await supabase
+        .from("behavioral_events")
+        .select("payload")
+        .eq("user_id", user.id)
+        .eq("event_type", "referral_bonus_forfeited");
+      forfeitedPoints = (forfeits || []).reduce((sum, r) => {
+        const amount = (r.payload as { amount?: number } | null)?.amount;
+        return sum + (typeof amount === "number" ? amount : 0);
+      }, 0);
+
+      // The notice is about to render (once per page load). Record the exposure
+      // so notice-to-action can be measured against later privacy changes.
+      if (!disclosureEligible && forfeitedPoints > 0) {
+        await trackEvent({
+          userId: user.id,
+          eventType: "forfeit_notice_viewed",
+          payload: { forfeited_points: forfeitedPoints, ...switches },
+        });
+      }
+    }
 
     return Response.json({
       code,
@@ -104,8 +127,10 @@ export async function GET(request: NextRequest) {
       recruiter,
       referral_points: referralPoints,
       recent_earnings: recentEarnings,
-      disclosure_eligible: disclosureEligible,
-      forfeited_points: forfeitedPoints,
+      forfeit_notice: switches.forfeit_notice,
+      ...(switches.forfeit_notice === "shown"
+        ? { disclosure_eligible: disclosureEligible, forfeited_points: forfeitedPoints }
+        : {}),
     });
   } catch (error) {
     return errorResponse(error);
