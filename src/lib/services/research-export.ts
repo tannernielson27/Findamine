@@ -21,6 +21,7 @@ import {
   type SettingsErrorResult,
   type TimedVisibility,
 } from "@/lib/utils/settings-error";
+import { loadStorylineColumns } from "@/lib/services/storyline-export";
 
 export type ExportFormat = "csv" | "tsv" | "json";
 
@@ -375,6 +376,9 @@ export async function generateResearchExport(config: ExportConfig): Promise<stri
     dimensionNames.add((a.treatment_dimensions as unknown as { name: string }).name);
   }
 
+  // Cohort-2 storyline columns (C2, C3, D2, D3), only for dimensions in play.
+  const storyline = await loadStorylineColumns(supabase, userIds, dimensionNames);
+
   const num = (n: number | undefined, dp = 0) =>
     n === undefined ? "" : dp > 0 ? n.toFixed(dp) : String(n);
 
@@ -415,6 +419,7 @@ export async function generateResearchExport(config: ExportConfig): Promise<stri
     "time_to_first_change_hours",
     "total_privacy_events",
     ...surveyHeaders,
+    ...storyline.headers,
   ];
 
   const rows: string[][] = [];
@@ -488,6 +493,7 @@ export async function generateResearchExport(config: ExportConfig): Promise<stri
       ttfc,
       num(totalEvents.get(userId) || 0),
       ...surveyValues,
+      ...storyline.valuesFor(userId),
     ]);
   }
 
@@ -569,7 +575,7 @@ type ServiceClient = Awaited<ReturnType<typeof createSupabaseServiceClient>>;
  * Names of the dimensions linked to a study, in sort_order (then name) so the
  * long-format datasets emit treatment_<dimension> columns in a stable order.
  */
-async function loadStudyDimensionNames(
+export async function loadStudyDimensionNames(
   supabase: ServiceClient,
   studyId: string
 ): Promise<string[]> {

@@ -6,6 +6,7 @@ import {
   generateEventsExport,
   type ExportFormat,
 } from "@/lib/services/research-export";
+import { generateStorylineEventsExport } from "@/lib/services/storyline-events-export";
 
 const FORMATS: ExportFormat[] = ["csv", "tsv", "json"];
 
@@ -18,8 +19,9 @@ export async function GET(request: NextRequest) {
     const studyId = searchParams.get("study_id");
     const format = (searchParams.get("format") || "csv") as ExportFormat;
     // "participants" (one row per participant), "trajectory" (one row per
-    // privacy-index snapshot), or "events" (one row per raw privacy_event —
-    // for survival models and flow-level friction funnels).
+    // privacy-index snapshot), "events" (one row per raw privacy_event —
+    // for survival models and flow-level friction funnels), or "storylines"
+    // (one row per S6 notice / S4 check-in — for habituation curves).
     const dataset = searchParams.get("dataset") || "participants";
 
     if (!studyId) throw new ApiError(400, "study_id required");
@@ -30,7 +32,9 @@ export async function GET(request: NextRequest) {
         ? await generateTrajectoryExport({ studyId, format })
         : dataset === "events"
           ? await generateEventsExport({ studyId, format })
-          : await generateResearchExport({ studyId, format });
+          : dataset === "storylines"
+            ? await generateStorylineEventsExport({ studyId, format })
+            : await generateResearchExport({ studyId, format });
 
     if (!content) {
       throw new ApiError(404, "No data found for this study");
