@@ -15,12 +15,21 @@ export async function GET(
 
     const { data, error } = await supabase
       .from("users")
-      .select("id, display_name, email, role, status, avatar_url, age_band, created_at, metadata, profile_visibility")
+      .select("id, display_name, email, role, status, avatar_url, created_at, metadata, profile_visibility")
       .eq("id", id)
       .single();
 
     if (error || !data) throw new ApiError(404, "User not found");
-    return Response.json({ user: data });
+
+    // age_band is a user_profiles column (effective_band); selecting it from
+    // `users` failed this whole query, so the route 404'd on every user.
+    const { data: bandRow } = await supabase
+      .from("user_profiles")
+      .select("effective_band")
+      .eq("user_id", id)
+      .maybeSingle();
+
+    return Response.json({ user: { ...data, age_band: bandRow?.effective_band ?? null } });
   } catch (error) {
     return errorResponse(error);
   }

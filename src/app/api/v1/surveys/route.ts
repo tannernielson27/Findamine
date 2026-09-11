@@ -13,20 +13,26 @@ export async function GET(request: NextRequest) {
     const supabase = await createSupabaseServiceClient();
 
     if (pending === "true") {
+      // A participant's "to-do" list: not-yet-submitted deliveries. Include
+      // `opened` (started but not finished) alongside `pending` so a survey the
+      // user began doesn't silently vanish from their list.
       const { data } = await supabase
         .from("survey_deliveries")
-        .select("*, surveys(*)")
+        .select("*, surveys(id, title, description, status)")
         .eq("user_id", user.id)
-        .eq("status", "pending")
+        .in("status", ["pending", "opened"])
         .order("created_at");
       return Response.json({ deliveries: data || [] });
     }
 
-    // Admin/researcher: list all surveys
+    // Admin/researcher: list all surveys with question counts + schedule info so
+    // the authoring UI can show what's ready to activate at a glance.
     if (["admin", "researcher", "teacher"].includes(user.role)) {
       const { data } = await supabase
         .from("surveys")
-        .select("*")
+        .select(
+          "*, survey_questions(count), survey_schedules(trigger_type, trigger_config, active)"
+        )
         .is("deleted_at", null)
         .order("created_at", { ascending: false });
       return Response.json({ surveys: data || [] });

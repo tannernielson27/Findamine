@@ -2,7 +2,7 @@
 
 import { useState, useEffect } from "react";
 import Link from "next/link";
-import { Settings, RefreshCw, Shield } from "lucide-react";
+import { Settings, RefreshCw, Shield, BookOpen, Users } from "lucide-react";
 
 export default function SettingsPage() {
   const [user, setUser] = useState<{ display_name: string; email: string; role: string } | null>(null);
@@ -117,6 +117,22 @@ export default function SettingsPage() {
         >
           <Shield className="w-4 h-4" />
           Privacy settings
+        </Link>
+
+        <Link
+          href="/dashboard/join-class"
+          className="flex items-center gap-2 text-sm text-brand hover:underline font-medium"
+        >
+          <Users className="w-4 h-4" />
+          Join a class with a code
+        </Link>
+
+        <Link
+          href="/debrief"
+          className="flex items-center gap-2 text-sm text-brand hover:underline font-medium"
+        >
+          <BookOpen className="w-4 h-4" />
+          About this research study
         </Link>
       </div>
     </main>

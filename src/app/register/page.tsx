@@ -1,12 +1,20 @@
 "use client";
 
-import { useState } from "react";
+import { Suspense, useState } from "react";
 import Link from "next/link";
 import Image from "next/image";
-import { useRouter } from "next/navigation";
-import { MapPin } from "lucide-react";
+import { useRouter, useSearchParams } from "next/navigation";
+import { MapPin, Users } from "lucide-react";
 
 export default function RegisterPage() {
+  return (
+    <Suspense>
+      <RegisterForm />
+    </Suspense>
+  );
+}
+
+function RegisterForm() {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [displayName, setDisplayName] = useState("");
@@ -16,6 +24,8 @@ export default function RegisterPage() {
   const [success, setSuccess] = useState(false);
   const [loading, setLoading] = useState(false);
   const router = useRouter();
+  const searchParams = useSearchParams();
+  const referralCode = searchParams.get("ref")?.trim().toUpperCase() || "";
 
   async function handleRegister(e: React.FormEvent) {
     e.preventDefault();
@@ -31,6 +41,7 @@ export default function RegisterPage() {
         display_name: displayName,
         role,
         date_of_birth: role === "teen" ? dateOfBirth : undefined,
+        referral_code: referralCode || undefined,
       }),
     });
 
@@ -91,6 +102,16 @@ export default function RegisterPage() {
               </div>
             )}
 
+            {referralCode && (
+              <div className="rounded-xl bg-sky-50 border border-sky-100 p-3 text-sm text-sky-800 flex items-center gap-2">
+                <Users className="w-4 h-4 shrink-0" />
+                <span>
+                  Invited by a friend — code <strong>{referralCode}</strong> will
+                  be applied when you join.
+                </span>
+              </div>
+            )}
+
             <div>
               <label htmlFor="displayName" className="block text-sm font-medium text-gray-700 mb-1">
                 Explorer name
@@ -129,11 +150,11 @@ export default function RegisterPage() {
                 id="password"
                 type="password"
                 required
-                minLength={6}
+                minLength={8}
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
                 className="block w-full rounded-xl border border-gray-200 bg-gray-50 px-4 py-2.5 text-sm focus:bg-white focus:border-brand focus:outline-none focus:ring-2 focus:ring-brand/20 transition-all"
-                placeholder="At least 6 characters"
+                placeholder="At least 8 characters"
               />
             </div>
 

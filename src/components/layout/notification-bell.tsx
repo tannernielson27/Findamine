@@ -1,33 +1,68 @@
 "use client";
 
 import { useState, useEffect, useRef } from "react";
-import { createSupabaseBrowserClient } from "@/lib/supabase/client";
+import { useRouter } from "next/navigation";
+import {
+  PRIVACY_CHECKIN_TYPE,
+  CHECKIN_TARGET_PATH,
+  type CheckinResponseAction,
+} from "@/lib/services/privacy-checkin";
 
 interface Notification {
   id: string;
   type: string;
   title: string;
   body: string | null;
-  is_read: boolean;
+  /** Column name on public.notifications (the API returns rows as stored). */
+  read: boolean;
   created_at: string;
 }
 
+/**
+ * Report a privacy check-in response (storyline S4). Fire-and-forget with
+ * keepalive so an open that navigates away is still recorded. Never throws.
+ */
+function logCheckinResponse(
+  notificationId: string,
+  action: CheckinResponseAction,
+  reason?: "mark_all"
+): void {
+  try {
+    void fetch("/api/v1/research/checkin-events", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ notification_id: notificationId, action, ...(reason ? { reason } : {}) }),
+      keepalive: true,
+    }).catch(() => {});
+  } catch {
+    // telemetry must never break the bell
+  }
+}
+
 export default function NotificationBell() {
+  const router = useRouter();
   const [notifications, setNotifications] = useState<Notification[]>([]);
   const [open, setOpen] = useState(false);
   const [loading, setLoading] = useState(false);
   const dropdownRef = useRef<HTMLDivElement>(null);
 
-  const unreadCount = notifications.filter((n) => !n.is_read).length;
+  const unreadCount = notifications.filter((n) => !n.read).length;
 
+  // State is only set after the request resolves, so calling this from an
+  // effect never triggers a synchronous re-render; the skeleton is switched on
+  // by the dropdown toggle instead.
   async function fetchNotifications() {
-    setLoading(true);
-    const res = await fetch("/api/v1/notifications?limit=20");
-    if (res.ok) {
-      const data = await res.json();
-      setNotifications(data.notifications || []);
+    try {
+      const res = await fetch("/api/v1/notifications?limit=20");
+      if (res.ok) {
+        const data = await res.json();
+        setNotifications(data.notifications || []);
+      }
+    } catch {
+      // keep the current list on a transient failure
+    } finally {
+      setLoading(false);
     }
-    setLoading(false);
   }
 
   // Load on mount
@@ -69,25 +104,53 @@ export default function NotificationBell() {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ id }),
+      keepalive: true,
     });
     setNotifications((prev) =>
-      prev.map((n) => (n.id === id ? { ...n, is_read: true } : n))
+      prev.map((n) => (n.id === id ? { ...n, read: true } : n))
     );
   }
 
   async function handleMarkAllRead() {
+    // Clearing unread check-ins in bulk is a dismissal, recorded as such.
+    for (const n of notifications) {
+      if (!n.read && n.type === PRIVACY_CHECKIN_TYPE) logCheckinResponse(n.id, "dismissed", "mark_all");
+    }
     await fetch("/api/v1/notifications", {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ mark_all_read: true }),
     });
-    setNotifications((prev) => prev.map((n) => ({ ...n, is_read: true })));
+    setNotifications((prev) => prev.map((n) => ({ ...n, read: true })));
+  }
+
+  async function handleSelect(n: Notification) {
+    if (n.type !== PRIVACY_CHECKIN_TYPE) {
+      if (!n.read) await handleMarkRead(n.id);
+      return;
+    }
+    // A privacy check-in opens the privacy page (storyline S4).
+    logCheckinResponse(n.id, "opened");
+    if (!n.read) await handleMarkRead(n.id);
+    setOpen(false);
+    router.push(CHECKIN_TARGET_PATH);
+  }
+
+  async function handleDismiss(n: Notification) {
+    logCheckinResponse(n.id, "dismissed");
+    await handleMarkRead(n.id);
   }
 
   return (
     <div className="relative" ref={dropdownRef}>
       <button
-        onClick={() => { setOpen(!open); if (!open) fetchNotifications(); }}
+        onClick={() => {
+          setOpen(!open);
+          if (!open) {
+            setLoading(true);
+            void fetchNotifications();
+          }
+        }}
         className="relative p-1.5 rounded-md text-gray-600 hover:bg-gray-100"
         aria-label={unreadCount > 0 ? `Notifications, ${unreadCount} unread` : "Notifications"}
         aria-expanded={open}
@@ -127,32 +190,46 @@ export default function NotificationBell() {
             ) : notifications.length === 0 ? (
               <p className="p-6 text-center text-sm text-gray-500">No notifications</p>
             ) : (
-              notifications.map((n) => (
-                <button
-                  key={n.id}
-                  onClick={() => !n.is_read && handleMarkRead(n.id)}
-                  className={`w-full text-left px-4 py-3 border-b border-gray-50 hover:bg-gray-50 transition-colors ${
-                    !n.is_read ? "bg-sky-50/50" : ""
-                  }`}
-                >
-                  <div className="flex items-start gap-2">
-                    {!n.is_read && (
-                      <span className="mt-1.5 w-2 h-2 rounded-full bg-sky-500 shrink-0" />
+              notifications.map((n) => {
+                const isCheckin = n.type === PRIVACY_CHECKIN_TYPE;
+                return (
+                  <div
+                    key={n.id}
+                    className={`flex items-start border-b border-gray-50 ${!n.read ? "bg-sky-50/50" : ""}`}
+                  >
+                    <button
+                      onClick={() => void handleSelect(n)}
+                      className="min-w-0 flex-1 text-left px-4 py-3 hover:bg-gray-50 transition-colors"
+                    >
+                      <div className="flex items-start gap-2">
+                        {!n.read && (
+                          <span className="mt-1.5 w-2 h-2 rounded-full bg-sky-500 shrink-0" />
+                        )}
+                        <div className="min-w-0">
+                          <p className={`text-sm ${!n.read ? "font-medium text-gray-900" : "text-gray-700"}`}>
+                            {n.title}
+                          </p>
+                          {n.body && (
+                            <p className="text-xs text-gray-500 mt-0.5 truncate">{n.body}</p>
+                          )}
+                          <p className="text-[10px] text-gray-500 mt-1">
+                            {formatTimeAgo(n.created_at)}
+                          </p>
+                        </div>
+                      </div>
+                    </button>
+                    {isCheckin && !n.read && (
+                      <button
+                        onClick={() => void handleDismiss(n)}
+                        aria-label={`Dismiss: ${n.title}`}
+                        className="shrink-0 mr-2 mt-2.5 rounded px-2 py-1 text-xs text-gray-500 hover:bg-gray-100 hover:text-gray-700 transition-colors"
+                      >
+                        Dismiss
+                      </button>
                     )}
-                    <div className="min-w-0">
-                      <p className={`text-sm ${!n.is_read ? "font-medium text-gray-900" : "text-gray-700"}`}>
-                        {n.title}
-                      </p>
-                      {n.body && (
-                        <p className="text-xs text-gray-500 mt-0.5 truncate">{n.body}</p>
-                      )}
-                      <p className="text-[10px] text-gray-500 mt-1">
-                        {formatTimeAgo(n.created_at)}
-                      </p>
-                    </div>
                   </div>
-                </button>
-              ))
+                );
+              })
             )}
           </div>
         </div>

@@ -6,10 +6,18 @@ import { usePathname, useRouter } from "next/navigation";
 import { createSupabaseBrowserClient } from "@/lib/supabase/client";
 import { useState } from "react";
 import NotificationBell from "./notification-bell";
-import { Compass, Map, PlusCircle, Users, ShieldCheck, Settings, LogOut, Menu, X } from "lucide-react";
+import SurveyNudge from "./survey-nudge";
+import { Compass, Map, PlusCircle, Users, ShieldCheck, Settings, LogOut, Menu, X, Lock } from "lucide-react";
 
 interface NavbarProps {
-  user: { id: string; display_name: string | null; role: string; avatar_url: string | null } | null;
+  user: {
+    id: string;
+    display_name: string | null;
+    role: string;
+    avatar_url: string | null;
+    /** Assigned friction condition — "low" surfaces Privacy in the main nav. */
+    privacy_friction?: "low" | "high" | null;
+  } | null;
 }
 
 export default function Navbar({ user }: NavbarProps) {
@@ -39,6 +47,11 @@ export default function Navbar({ user }: NavbarProps) {
           : []),
         ...(isAdmin
           ? [{ href: "/admin", label: "Admin", icon: ShieldCheck }]
+          : []),
+        // LOW-friction condition: privacy is one prominent click from anywhere.
+        // (High-friction participants reach it via Settings → More → Privacy.)
+        ...(user.privacy_friction === "low"
+          ? [{ href: "/settings/privacy", label: "Privacy", icon: Lock }]
           : []),
       ]
     : [];
@@ -84,6 +97,7 @@ export default function Navbar({ user }: NavbarProps) {
         <div className="flex items-center gap-2">
           {user ? (
             <>
+              <SurveyNudge />
               <NotificationBell />
               <Link
                 href="/settings"

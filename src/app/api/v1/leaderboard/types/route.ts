@@ -1,12 +1,43 @@
 import { NextRequest } from "next/server";
 import { createSupabaseServiceClient } from "@/lib/supabase/server";
-import { errorResponse, ApiError } from "@/lib/utils/api-auth";
+import { getAuthUser, errorResponse, ApiError } from "@/lib/utils/api-auth";
 import { generalLimiter } from "@/lib/utils/rate-limit";
+import { resolveLeaderboardVisibility } from "@/lib/utils/leaderboard-visibility";
 
 const VALID_TYPES = [
   "global_lifetime", "weekly", "monthly", "subject_specific",
   "improvement", "speed_run", "streak_current",
 ];
+
+type Row = Record<string, unknown>;
+
+/**
+ * Apply privacy enforcement to a set of leaderboard rows.
+ * - scoreBoard: rows rank by a score → omit users who restricted `total_score`.
+ * - always: redact `display_name` when the viewer can't see it (both the flat
+ *   RPC shape and the embedded `users(display_name)` shape).
+ */
+async function applyVisibility(
+  viewerId: string | null,
+  rows: Row[],
+  scoreBoard: boolean
+): Promise<Row[]> {
+  const ids = rows.map((r) => String(r.user_id ?? "")).filter(Boolean);
+  const { drop, nameAllowed } = await resolveLeaderboardVisibility(viewerId, ids);
+
+  return rows
+    .filter((r) => !scoreBoard || !drop.has(String(r.user_id ?? "")))
+    .map((r) => {
+      const allowed = nameAllowed.get(String(r.user_id ?? "")) ?? true;
+      if (allowed) return r;
+      const embedded = r.users;
+      if (embedded && typeof embedded === "object") {
+        return { ...r, users: { ...(embedded as Row), display_name: "Anonymous" } };
+      }
+      if ("display_name" in r) return { ...r, display_name: "Anonymous" };
+      return r;
+    });
+}
 
 /**
  * Advanced leaderboard types.
@@ -25,6 +56,9 @@ export async function GET(request: NextRequest) {
     }
 
     const supabase = await createSupabaseServiceClient();
+    // Optional: an authenticated viewer resolves closer relationships (team/class);
+    // an anonymous caller is treated as "public" to every user.
+    const viewerId = (await getAuthUser(request))?.id ?? null;
 
     switch (type) {
       case "weekly": {
@@ -37,7 +71,8 @@ export async function GET(request: NextRequest) {
           .order("total_score", { ascending: false })
           .limit(limit);
 
-        return Response.json({ type, entries: data || [], period: "last_7_days" });
+        const entries = await applyVisibility(viewerId, (data || []) as Row[], true);
+        return Response.json({ type, entries, period: "last_7_days" });
       }
 
       case "monthly": {
@@ -50,7 +85,8 @@ export async function GET(request: NextRequest) {
           .order("total_score", { ascending: false })
           .limit(limit);
 
-        return Response.json({ type, entries: data || [], period: "last_30_days" });
+        const entries = await applyVisibility(viewerId, (data || []) as Row[], true);
+        return Response.json({ type, entries, period: "last_30_days" });
       }
 
       case "subject_specific": {
@@ -63,13 +99,15 @@ export async function GET(request: NextRequest) {
           .order("total_score", { ascending: false })
           .limit(limit);
 
-        return Response.json({ type, subject, entries: data || [] });
+        const entries = await applyVisibility(viewerId, (data || []) as Row[], true);
+        return Response.json({ type, subject, entries });
       }
 
       case "improvement": {
         // DB-level aggregation via RPC (scales to millions of sessions)
         const { data } = await supabase.rpc("get_user_improvements", { p_limit: limit });
-        return Response.json({ type, entries: data || [] });
+        const entries = await applyVisibility(viewerId, (data || []) as Row[], true);
+        return Response.json({ type, entries });
       }
 
       case "streak_current": {
@@ -80,19 +118,23 @@ export async function GET(request: NextRequest) {
           .order("current_streak", { ascending: false })
           .limit(limit);
 
-        return Response.json({ type, entries: data || [] });
+        // Streak boards rank by streak, not total_score → redact names only.
+        const entries = await applyVisibility(viewerId, (data || []) as Row[], false);
+        return Response.json({ type, entries });
       }
 
       case "speed_run": {
         // DB-level aggregation via RPC (scales to millions of sessions)
         const { data } = await supabase.rpc("get_speed_run_leaderboard", { p_limit: limit });
-        return Response.json({ type, entries: data || [] });
+        const entries = await applyVisibility(viewerId, (data || []) as Row[], true);
+        return Response.json({ type, entries });
       }
 
       default: {
         // global_lifetime
         const { data } = await supabase.rpc("overall_leaderboard", { p_limit: limit });
-        return Response.json({ type, entries: data || [] });
+        const entries = await applyVisibility(viewerId, (data || []) as Row[], true);
+        return Response.json({ type, entries });
       }
     }
   } catch (error) {
