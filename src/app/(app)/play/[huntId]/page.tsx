@@ -7,6 +7,8 @@ import HotColdMeter from "@/components/play/hot-cold-meter";
 import ChallengeInput from "@/components/play/challenge-input";
 import NavigateMap from "@/components/maps/navigate-map";
 import { Celebration } from "@/components/ui/celebration";
+import { PrivacyNoticeToast } from "@/components/play/privacy-notice-toast";
+import type { PrivacyNotice } from "@/lib/services/privacy-notice";
 import {
   celebrationForResult,
   arrivalCelebration,
@@ -98,6 +100,9 @@ export default function PlayPage() {
   const [celebrationSub, setCelebrationSub] = useState<string | undefined>(undefined);
   const [celebrationIntensity, setCelebrationIntensity] = useState<CelebrationIntensity>("medium");
   const [sessionScore, setSessionScore] = useState(0);
+  // Just-in-time privacy notice after a completed find (storyline S6).
+  const [privacyNotice, setPrivacyNotice] = useState<PrivacyNotice | null>(null);
+  const closePrivacyNotice = useCallback(() => setPrivacyNotice(null), []);
   const [arrivedCelebrated, setArrivedCelebrated] = useState(false);
   const [huntComplete, setHuntComplete] = useState(false);
   const [huntSummary, setHuntSummary] = useState<{
@@ -397,6 +402,7 @@ export default function PlayPage() {
         if (typeof data.score === "number" && !huntMeta.hide_scores) {
           setSessionScore((s) => s + data.score);
         }
+        if (data.privacy_notice?.id) setPrivacyNotice(data.privacy_notice as PrivacyNotice);
         setStep("capture");
       }
     } catch (err) {
@@ -545,6 +551,14 @@ export default function PlayPage() {
         intensity={celebrationIntensity}
         onComplete={() => setShowCelebration(false)}
       />
+
+      {privacyNotice && (
+        <PrivacyNoticeToast
+          key={privacyNotice.id}
+          notice={privacyNotice}
+          onClose={closePrivacyNotice}
+        />
+      )}
 
       {/* Error banner */}
       {error && (
