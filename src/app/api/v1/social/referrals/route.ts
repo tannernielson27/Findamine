@@ -2,9 +2,34 @@ import { NextRequest } from "next/server";
 import { createSupabaseServiceClient } from "@/lib/supabase/server";
 import { getAuthUser, errorResponse, ApiError } from "@/lib/utils/api-auth";
 import { socialLimiter } from "@/lib/utils/rate-limit";
-import { getOrCreateReferralCode, redeemReferral } from "@/lib/services/referral";
+import {
+  getOrCreateReferralCode,
+  redeemReferral,
+  isDisclosureEligible,
+  resolveReferralSwitches,
+} from "@/lib/services/referral";
+import { trackEvent } from "@/lib/utils/track-event";
+import { filterProfileForViewer } from "@/lib/utils/privacy";
+import { getViewerRelationships } from "@/lib/utils/viewer";
 
-// GET: my referral code, my minions, and referral points earned.
+type EmbeddedUser = {
+  id: string;
+  display_name: string | null;
+  avatar_url: string | null;
+  profile_visibility?: Record<string, string>;
+};
+
+// Supabase types an embedded FK join as an array even for to-one relations.
+// Normalize to a single object (or null) to match the runtime shape.
+function asUser(embed: unknown): EmbeddedUser | null {
+  const v = Array.isArray(embed) ? embed[0] : embed;
+  return (v ?? null) as EmbeddedUser | null;
+}
+
+// GET: my referral code, my minions, my recruiter, points earned, and a recent
+// earnings feed. Read-only surfacing of the A6 economy — no mechanics changed.
+// Embedded counterpart names are run through filterProfileForViewer so A5
+// profile-field enforcement stays intact.
 export async function GET(request: NextRequest) {
   try {
     const user = await getAuthUser(request);
@@ -13,25 +38,99 @@ export async function GET(request: NextRequest) {
     const supabase = await createSupabaseServiceClient();
     const code = await getOrCreateReferralCode(user.id);
 
-    const { data: minions } = await supabase
+    const { data: minionRows } = await supabase
       .from("minion_links")
-      .select("minion_id, created_at, users:minion_id(id, display_name, avatar_url)")
+      .select("minion_id, created_at, users:minion_id(id, display_name, avatar_url, profile_visibility)")
       .eq("recruiter_id", user.id)
       .order("created_at", { ascending: false });
 
-    const { data: earned } = await supabase
-      .from("points_ledger")
-      .select("amount")
-      .eq("user_id", user.id)
-      .eq("source_type", "referral");
+    const { data: recruiterRow } = await supabase
+      .from("minion_links")
+      .select("recruiter_id, created_at, users:recruiter_id(id, display_name, avatar_url, profile_visibility)")
+      .eq("minion_id", user.id)
+      .maybeSingle();
 
-    const referralPoints = (earned || []).reduce((sum, r) => sum + (r.amount || 0), 0);
+    // Privacy-enforce all embedded counterparts using the real relationship.
+    const counterpartIds = [
+      ...(minionRows || []).map((r) => asUser(r.users)?.id),
+      asUser(recruiterRow?.users)?.id,
+    ].filter((id): id is string => Boolean(id));
+    const rels = await getViewerRelationships(user.id, counterpartIds);
+
+    const present = (u: EmbeddedUser | null) => {
+      if (!u?.id) return null;
+      const rel = rels.get(u.id) ?? "public";
+      return { id: u.id, ...filterProfileForViewer(u, rel) };
+    };
+
+    const minions = (minionRows || []).map((r) => ({
+      created_at: r.created_at,
+      user: present(asUser(r.users)),
+    }));
+
+    const recruiter = recruiterRow
+      ? { created_at: recruiterRow.created_at, user: present(asUser(recruiterRow.users)) }
+      : null;
+
+    const { data: ledger } = await supabase
+      .from("points_ledger")
+      .select("amount, created_at, description")
+      .eq("user_id", user.id)
+      .eq("source_type", "referral")
+      .order("created_at", { ascending: false });
+
+    const referralPoints = (ledger || []).reduce((sum, r) => sum + (r.amount || 0), 0);
+    const recentEarnings = (ledger || []).slice(0, 8);
+
+    // Disclosure gate status + what hiding has cost so far (forfeited bonuses
+    // are tracked as behavioral events, not paid) — the felt cost of privacy.
+    const { data: me } = await supabase
+      .from("users")
+      .select("profile_visibility, metadata")
+      .eq("id", user.id)
+      .maybeSingle();
+    const disclosureEligible = isDisclosureEligible(
+      me?.profile_visibility as Record<string, string> | undefined
+    );
+    const switches = resolveReferralSwitches(me?.metadata as Record<string, unknown> | undefined);
+
+    // Storyline S3 (migration 059): under `silent` the recruiter is never told
+    // what hiding has cost them. Forfeits are still LOGGED at award time; only
+    // the surfacing is suppressed, so the API omits the gate fields entirely.
+    let forfeitedPoints: number | undefined;
+    if (switches.forfeit_notice === "shown") {
+      const { data: forfeits } = await supabase
+        .from("behavioral_events")
+        .select("payload")
+        .eq("user_id", user.id)
+        .eq("event_type", "referral_bonus_forfeited");
+      forfeitedPoints = (forfeits || []).reduce((sum, r) => {
+        const amount = (r.payload as { amount?: number } | null)?.amount;
+        return sum + (typeof amount === "number" ? amount : 0);
+      }, 0);
+
+      // The notice is about to render (once per page load). Record the exposure
+      // so notice-to-action can be measured against later privacy changes.
+      if (!disclosureEligible && forfeitedPoints > 0) {
+        await trackEvent({
+          userId: user.id,
+          eventType: "forfeit_notice_viewed",
+          payload: { forfeited_points: forfeitedPoints, ...switches },
+        });
+      }
+    }
 
     return Response.json({
       code,
-      minions: minions || [],
-      minion_count: (minions || []).length,
+      minions,
+      minion_count: minions.length,
+      recruiter,
       referral_points: referralPoints,
+      recent_earnings: recentEarnings,
+      forfeit_notice: switches.forfeit_notice,
+      ...(switches.forfeit_notice === "shown"
+        ? { disclosure_eligible: disclosureEligible, forfeited_points: forfeitedPoints }
+        : {}),
     });
   } catch (error) {
     return errorResponse(error);

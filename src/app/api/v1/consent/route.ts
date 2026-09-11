@@ -9,23 +9,15 @@ export async function GET(request: NextRequest) {
 
     const supabase = await createSupabaseServiceClient();
 
-    const [consent, privacy] = await Promise.all([
-      supabase
-        .from("consent_records")
-        .select("*")
-        .eq("user_id", user.id)
-        .is("revoked_at", null)
-        .order("created_at", { ascending: false }),
-      supabase
-        .from("privacy_settings")
-        .select("*")
-        .eq("user_id", user.id)
-        .maybeSingle(),
-    ]);
+    const consent = await supabase
+      .from("consent_records")
+      .select("*")
+      .eq("user_id", user.id)
+      .is("revoked_at", null)
+      .order("created_at", { ascending: false });
 
     return Response.json({
       consent_records: consent.data || [],
-      privacy_settings: privacy.data || { granularity_tier: "simple", settings: {} },
     });
   } catch (error) {
     return errorResponse(error);
@@ -72,23 +64,7 @@ export async function POST(request: NextRequest) {
       return Response.json({ consent: data }, { status: 201 });
     }
 
-    // Update privacy settings
-    if (body.privacy_settings) {
-      const { data, error } = await supabase
-        .from("privacy_settings")
-        .upsert({
-          user_id: user.id,
-          granularity_tier: body.privacy_settings.granularity_tier || "simple",
-          settings: body.privacy_settings.settings || {},
-        }, { onConflict: "user_id" })
-        .select()
-        .single();
-
-      if (error) throw new ApiError(500, error.message);
-      return Response.json({ privacy_settings: data });
-    }
-
-    throw new ApiError(400, "Provide consent_type or privacy_settings");
+    throw new ApiError(400, "Provide consent_type");
   } catch (error) {
     return errorResponse(error);
   }

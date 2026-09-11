@@ -59,3 +59,31 @@ body {
   background-color: var(--color-background, #FFFFFF);
   color: var(--color-text, #111827);
 }
+
+/* ─── Play-loop reward motion ───────────────────────────────────
+   Burning-zone pulse for the hot/cold meter — the "right on top of it"
+   climax. Compositor-friendly (transform/opacity only) per perf rules. */
+
+@keyframes findamine-burning-pulse {
+  0%, 100% { transform: scale(1); opacity: 1; }
+  50% { transform: scale(1.18); opacity: 0.85; }
+}
+
+.fm-burning-pulse {
+  animation: findamine-burning-pulse 0.7s var(--ease-out, ease-in-out) infinite;
+}
+
+/* ─── Reduced motion ────────────────────────────────────────────
+   Honor the OS setting globally. Confetti is already gated in JS via
+   useReducedMotion; this neutralizes CSS-driven motion as a backstop. */
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
+}

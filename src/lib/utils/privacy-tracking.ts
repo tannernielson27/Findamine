@@ -7,7 +7,12 @@
  * intentionally side-effecting and never throws.
  */
 
-import { type VisibilityLevel } from "@/lib/utils/privacy";
+import {
+  CATEGORIES,
+  PROFILE_FIELDS,
+  VISIBILITY_LABELS,
+  type VisibilityLevel,
+} from "@/lib/utils/privacy";
 
 // Ordinal restrictiveness: higher = more private. Unset is treated as "everyone".
 const ORDINAL: Record<VisibilityLevel, number> = {
@@ -62,6 +67,36 @@ export function classifyChange(deltas: FieldDelta[]): ChangeDirection {
   return "none";
 }
 
+/** Number of visibility levels offered per control (nobody/team/class/everyone). */
+const LEVEL_COUNT = Object.keys(VISIBILITY_LABELS).length;
+
+/**
+ * Objective number of options a participant is shown on the privacy page under
+ * a control-complexity scheme (Workstream B / Task B4). One control × its
+ * levels: simple = 1 master control; moderate = one control per category;
+ * complex = one control per profile field. Derived from the real constants so
+ * it tracks any change to the field/category lists. Unknown scheme → 0 (the
+ * page renders no controls for it).
+ */
+export function countOptionsShown(scheme: string, peopleListed = 0): number {
+  switch (scheme) {
+    case "simple":
+      return LEVEL_COUNT;
+    case "moderate":
+      return CATEGORIES.length * LEVEL_COUNT;
+    case "complex":
+      // Per-field controls plus the per-person layer (migration 057): each
+      // person listed adds a 3-way choice per person, mirroring the 2014
+      // "20 + 3 per frenemy" High condition.
+      return PROFILE_FIELDS.length * LEVEL_COUNT + OVERRIDE_OPTIONS_PER_PERSON * Math.max(0, peopleListed);
+    default:
+      return 0;
+  }
+}
+
+/** Options a per-person override adds per person listed (inherit / can see / hidden). */
+export const OVERRIDE_OPTIONS_PER_PERSON = 3;
+
 export interface PrivacyEventPayload {
   event_type: "privacy_change" | "privacy_abandon" | "privacy_view" | "privacy_field_touch";
   page?: string;
@@ -70,6 +105,8 @@ export interface PrivacyEventPayload {
   duration_ms?: number;
   click_count?: number;
   session_id?: string;
+  /** S5 norm line shown on this page view (migration 062); validated server-side. */
+  norm_exposure_id?: string | null;
   metadata?: Record<string, unknown>;
 }
 

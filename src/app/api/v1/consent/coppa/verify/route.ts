@@ -63,22 +63,6 @@ export async function GET(request: NextRequest) {
       .eq("id", childId)
       .eq("status", "pending_consent"); // Only activate if still pending
 
-    // Create restrictive default privacy settings for the child
-    await supabase.from("privacy_settings").upsert(
-      {
-        user_id: childId,
-        granularity_tier: "simple",
-        settings: {
-          share_display_name: false,
-          share_avatar: false,
-          allow_friend_requests: false,
-          allow_team_chat: true, // Within assigned teams only
-          share_location_data: false,
-        },
-      },
-      { onConflict: "user_id" }
-    );
-
     // Redirect to success page
     const siteUrl = process.env.NEXT_PUBLIC_SITE_URL || "https://findamine.app";
     return Response.redirect(`${siteUrl}/consent-verified?success=true`);

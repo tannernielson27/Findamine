@@ -46,8 +46,13 @@ export default async function ResearchPage() {
           </p>
 
           {/* Enrollment + logging completeness */}
-          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4 mb-8">
+          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-5 mb-8">
             <Stat label="Enrolled" value={`${health.study.current_sample_size}${health.study.target_sample_size ? ` / ${health.study.target_sample_size}` : ""}`} />
+            <Stat
+              label="Enrollment failures (7d)"
+              value={health.enrollment_failures_7d}
+              tone={health.enrollment_failures_7d > 0 ? "alert" : "default"}
+            />
             <Stat label="With privacy events" value={`${health.logging.with_privacy_events} (${pct(health.logging.with_privacy_events, health.logging.participants)})`} />
             <Stat label="With snapshots" value={`${health.logging.with_snapshots} (${pct(health.logging.with_snapshots, health.logging.participants)})`} />
             <Stat label="Events (24h)" value={health.logging.events_last_24h} />
@@ -83,6 +88,50 @@ export default async function ResearchPage() {
             </div>
           </section>
 
+          {/* Survey delivery/submission funnel (pilot validation check c) */}
+          <section className="mb-8">
+            <h2 className="text-sm font-semibold text-gray-900 mb-2">Survey funnel</h2>
+            {health.surveys.length === 0 ? (
+              <p className="text-sm text-gray-500">No time-scheduled surveys found (seed migrations 047/051).</p>
+            ) : (
+              <div className="rounded-lg border border-gray-200 overflow-hidden">
+                <table className="w-full text-sm">
+                  <thead className="bg-gray-50 text-gray-500 text-left">
+                    <tr>
+                      <th className="px-3 py-2 font-medium">Timepoint</th>
+                      <th className="px-3 py-2 font-medium">Survey</th>
+                      <th className="px-3 py-2 font-medium">Status</th>
+                      <th className="px-3 py-2 font-medium text-right">Delivered</th>
+                      <th className="px-3 py-2 font-medium text-right">Opened</th>
+                      <th className="px-3 py-2 font-medium text-right">Submitted</th>
+                      <th className="px-3 py-2 font-medium text-right">Expired</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {health.surveys.map((s, i) => (
+                      <tr key={i} className="border-t border-gray-100">
+                        <td className="px-3 py-2 font-medium text-gray-900">{s.timepoint}</td>
+                        <td className="px-3 py-2 text-gray-700">{s.survey_title}</td>
+                        <td className="px-3 py-2">
+                          <span className={s.survey_status === "active" ? "text-green-600" : "text-amber-600"}>
+                            {s.survey_status}
+                            {s.survey_status !== "active" && " (not delivering)"}
+                          </span>
+                        </td>
+                        <td className="px-3 py-2 text-right text-gray-900">{s.delivered}</td>
+                        <td className="px-3 py-2 text-right text-gray-900">{s.opened}</td>
+                        <td className="px-3 py-2 text-right text-gray-900">
+                          {s.submitted} <span className="text-gray-400">({pct(s.submitted, s.delivered)})</span>
+                        </td>
+                        <td className="px-3 py-2 text-right text-gray-500">{s.expired}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </section>
+
           {/* Referral mechanic */}
           <section className="mb-8">
             <h2 className="text-sm font-semibold text-gray-900 mb-2">Referral economy</h2>
@@ -94,7 +143,7 @@ export default async function ResearchPage() {
           </section>
 
           <p className="text-xs text-gray-400">
-            Validation checklist: balanced cells, &gt;0 events per participant, snapshots present, referral links flowing.
+            Validation checklist: balanced cells, &gt;0 events per participant, snapshots present, surveys delivering, referral links flowing.
           </p>
         </>
       )}
@@ -102,11 +151,27 @@ export default async function ResearchPage() {
   );
 }
 
-function Stat({ label, value }: { label: string; value: string | number }) {
+interface StatProps {
+  label: string;
+  value: string | number;
+  /** "alert" highlights a value that needs attention (e.g. enrollment failures > 0). */
+  tone?: "default" | "alert";
+}
+
+function Stat({ label, value, tone = "default" }: StatProps) {
+  const alert = tone === "alert";
   return (
-    <div className="rounded-lg border border-gray-200 bg-white p-3">
-      <div className="text-xl font-bold text-gray-900">{value}</div>
-      <div className="text-[11px] text-gray-500">{label}</div>
+    <div
+      className={
+        alert
+          ? "rounded-lg border border-red-300 bg-red-50 p-3"
+          : "rounded-lg border border-gray-200 bg-white p-3"
+      }
+    >
+      <div className={alert ? "text-xl font-bold text-red-700" : "text-xl font-bold text-gray-900"}>
+        {value}
+      </div>
+      <div className={alert ? "text-[11px] text-red-600" : "text-[11px] text-gray-500"}>{label}</div>
     </div>
   );
 }

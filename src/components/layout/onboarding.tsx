@@ -1,41 +1,33 @@
 "use client";
 
 import { useState, useEffect, useCallback, useRef } from "react";
+import { useRouter } from "next/navigation";
+import { motion, AnimatePresence } from "framer-motion";
+import { useReducedMotion } from "@/lib/hooks/use-reduced-motion";
+import {
+  ONBOARDING_MILESTONE,
+  stepsForRole,
+  onboardingDestination,
+  finalCtaLabel,
+} from "@/lib/onboarding/steps";
 
-const STEPS = [
-  {
-    title: "Welcome to findamine!",
-    body: "Findamine is a GPS-powered scavenger hunt platform for learning and fun. Let's show you around.",
-    icon: "👋",
-  },
-  {
-    title: "Browse & Play Hunts",
-    body: "Head to Browse Hunts to find adventures near you. Each hunt has multiple stops with clues, challenges, and rewards.",
-    icon: "🔍",
-  },
-  {
-    title: "Navigate with Hot/Cold",
-    body: "Use GPS to navigate to each stop. The hot/cold meter guides you — red means you're close, blue means keep walking!",
-    icon: "🧭",
-  },
-  {
-    title: "Complete Challenges",
-    body: "At each stop, answer a challenge question. Use hints if you get stuck — but they cost points!",
-    icon: "🧩",
-  },
-  {
-    title: "Earn Badges & Points",
-    body: "Every challenge earns points. Complete hunts to unlock badges and climb the leaderboard.",
-    icon: "🏆",
-  },
-];
+interface OnboardingProps {
+  role?: string;
+}
 
-export default function Onboarding() {
+export default function Onboarding({ role }: OnboardingProps) {
+  const router = useRouter();
+  const reducedMotion = useReducedMotion();
   const [show, setShow] = useState(false);
   const [step, setStep] = useState(0);
+  const modalRef = useRef<HTMLDivElement>(null);
+
+  const steps = stepsForRole(role);
+  const destination = onboardingDestination(role);
+  const finalCta = finalCtaLabel(role);
 
   useEffect(() => {
-    // Check localStorage first (fast), then API (authoritative)
+    // localStorage is the fast path; the API is authoritative.
     if (localStorage.getItem("onboarding_complete") === "true") return;
 
     async function check() {
@@ -43,47 +35,59 @@ export default function Onboarding() {
         const res = await fetch("/api/v1/onboarding");
         if (res.ok) {
           const data = await res.json();
-          const completed = (data.milestones || []).some(
-            (m: { milestone_type: string }) => m.milestone_type === "onboarding_complete"
-          );
-          if (completed) {
+          const done =
+            data.onboarding_complete ||
+            (data.milestones || []).some(
+              (m: { milestone_type: string }) =>
+                m.milestone_type === ONBOARDING_MILESTONE
+            );
+          if (done) {
             localStorage.setItem("onboarding_complete", "true");
           } else {
             setShow(true);
           }
         }
       } catch {
-        // If API fails, don't show onboarding (avoid blocking the UI)
+        // If the API fails, don't block the UI with a tutorial.
       }
     }
     check();
   }, []);
 
-  const handleComplete = useCallback(async () => {
-    setShow(false);
+  const recordComplete = useCallback(async () => {
     localStorage.setItem("onboarding_complete", "true");
     try {
       await fetch("/api/v1/onboarding", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ milestone_type: "onboarding_complete" }),
+        body: JSON.stringify({ milestone_type: ONBOARDING_MILESTONE }),
       });
     } catch {
-      // localStorage already set — dismiss works even if API fails
+      // localStorage already set — dismissal sticks even if the API call fails.
     }
   }, []);
 
-  const modalRef = useRef<HTMLDivElement>(null);
+  // Skip / Escape: dismiss without routing the user away.
+  const handleSkip = useCallback(() => {
+    setShow(false);
+    recordComplete();
+  }, [recordComplete]);
+
+  // Finish: dismiss AND propel the user into their first fun moment.
+  const handleFinish = useCallback(() => {
+    setShow(false);
+    recordComplete();
+    router.push(destination);
+  }, [recordComplete, router, destination]);
 
   // Escape key + focus trap
   useEffect(() => {
     if (!show) return;
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
-        handleComplete();
+        handleSkip();
         return;
       }
-      // Focus trap: keep Tab within modal
       if (e.key === "Tab" && modalRef.current) {
         const focusable = modalRef.current.querySelectorAll<HTMLElement>(
           'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])'
@@ -101,68 +105,98 @@ export default function Onboarding() {
       }
     };
     document.addEventListener("keydown", handleKeyDown);
-    // Focus the modal on open
     modalRef.current?.querySelector<HTMLElement>("button")?.focus();
     return () => document.removeEventListener("keydown", handleKeyDown);
-  }, [show, handleComplete]);
+  }, [show, handleSkip]);
 
   const handleNext = () => {
-    if (step < STEPS.length - 1) {
+    if (step < steps.length - 1) {
       setStep(step + 1);
     } else {
-      handleComplete();
+      handleFinish();
     }
   };
 
   if (!show) return null;
 
-  const current = STEPS[step];
+  const current = steps[step];
+  const isLast = step === steps.length - 1;
 
   return (
-    <div ref={modalRef} className="fixed inset-0 z-[60] flex items-center justify-center bg-black/40 px-4" role="dialog" aria-modal="true" aria-label="Welcome tutorial">
-      <div className="w-full max-w-sm rounded-2xl bg-white p-6 shadow-xl">
-        {/* Step indicator */}
-        <div className="flex gap-1 mb-6 justify-center">
-          {STEPS.map((_, i) => (
-            <div
-              key={i}
-              className={`h-1 rounded-full transition-all ${
-                i <= step ? "w-6 bg-sky-500" : "w-3 bg-gray-200"
-              }`}
-            />
-          ))}
-        </div>
-
-        <div className="text-center mb-6">
-          <div className="text-4xl mb-3">{current.icon}</div>
-          <h2 className="text-lg font-bold text-gray-900 mb-2">{current.title}</h2>
-          <p className="text-sm text-gray-600">{current.body}</p>
-        </div>
-
-        <div className="flex gap-3">
-          {step > 0 && (
-            <button
-              onClick={() => setStep(step - 1)}
-              className="flex-1 rounded-md border border-gray-300 px-4 py-2 text-sm text-gray-700 hover:bg-gray-50"
-            >
-              Back
-            </button>
-          )}
-          <button
-            onClick={handleNext}
-            className="flex-1 rounded-md bg-sky-600 px-4 py-2 text-sm font-medium text-white hover:bg-sky-700"
-          >
-            {step === STEPS.length - 1 ? "Get Started!" : "Next"}
-          </button>
-        </div>
-
-        <button
-          onClick={handleComplete}
-          className="block w-full mt-3 text-xs text-gray-500 hover:text-gray-600 text-center"
+    <div
+      className="fixed inset-0 z-[60] flex items-center justify-center bg-[var(--color-text,#111827)]/50 px-4 backdrop-blur-sm"
+      role="dialog"
+      aria-modal="true"
+      aria-label="Welcome tour"
+    >
+      <AnimatePresence mode="wait">
+        <motion.div
+          ref={modalRef}
+          key={step}
+          initial={reducedMotion ? { opacity: 0 } : { opacity: 0, y: 16, scale: 0.98 }}
+          animate={{ opacity: 1, y: 0, scale: 1 }}
+          exit={reducedMotion ? { opacity: 0 } : { opacity: 0, y: -8 }}
+          transition={{ duration: 0.22, ease: [0.16, 1, 0.3, 1] }}
+          className="w-full max-w-md overflow-hidden rounded-3xl bg-[var(--color-surface,#fff)] shadow-2xl ring-1 ring-themed-border"
         >
-          Skip tutorial
-        </button>
-      </div>
+          {/* Banner: brand wash with the step icon */}
+          <div className="relative bg-gradient-to-br from-brand-light via-brand to-brand-dark px-6 pt-8 pb-10 text-center">
+            <div className="mx-auto flex h-20 w-20 items-center justify-center rounded-2xl bg-white/90 text-5xl shadow-lg">
+              <span aria-hidden="true">{current.icon}</span>
+            </div>
+            <p className="mt-3 font-[family-name:var(--font-handwritten)] text-2xl text-white/90">
+              {isLast ? "last one!" : `step ${step + 1} of ${steps.length}`}
+            </p>
+          </div>
+
+          <div className="px-7 pb-7 pt-6">
+            <h2 className="font-[family-name:var(--font-display)] text-2xl font-bold text-themed-text">
+              {current.title}
+            </h2>
+            <p className="mt-2 text-[15px] leading-relaxed text-themed-muted">{current.body}</p>
+
+            {/* Step indicator */}
+            <div className="mt-6 mb-5 flex justify-center gap-1.5" aria-hidden="true">
+              {steps.map((_, i) => (
+                <div
+                  key={i}
+                  className={`h-1.5 rounded-full transition-all duration-300 ${
+                    i === step
+                      ? "w-7 bg-brand"
+                      : i < step
+                      ? "w-2 bg-brand/60"
+                      : "w-2 bg-themed-border"
+                  }`}
+                />
+              ))}
+            </div>
+
+            <div className="flex gap-3">
+              {step > 0 && (
+                <button
+                  onClick={() => setStep(step - 1)}
+                  className="flex-1 rounded-xl border border-themed-border px-4 py-2.5 text-sm font-medium text-themed-muted transition-colors hover:bg-themed-bg"
+                >
+                  Back
+                </button>
+              )}
+              <button
+                onClick={handleNext}
+                className="flex-1 rounded-xl bg-brand px-4 py-2.5 text-sm font-semibold text-white shadow-sm transition-all hover:bg-brand-dark active:scale-[0.98]"
+              >
+                {isLast ? finalCta : "Next"}
+              </button>
+            </div>
+
+            <button
+              onClick={handleSkip}
+              className="mt-3 block w-full text-center text-xs text-themed-muted hover:text-themed-text"
+            >
+              Skip the tour
+            </button>
+          </div>
+        </motion.div>
+      </AnimatePresence>
     </div>
   );
 }
