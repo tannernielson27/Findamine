@@ -267,12 +267,14 @@ export async function generateResearchExport(config: ExportConfig): Promise<stri
   // ── Survey scores per timepoint (T1/T2/T3) ──────────────────────
   // Map each scheduled survey to its timepoint label, score each participant's
   // submitted response by subscale, and expose a status per timepoint.
+  // Any trigger type counts (T1 is event-triggered since migration 054); a
+  // survey with several schedules keeps the first timepoint label seen.
   const surveyTimepoint = new Map<string, string>();
   const { data: schedules } = await supabase
     .from("survey_schedules")
-    .select("survey_id, trigger_config")
-    .eq("trigger_type", "time");
+    .select("survey_id, trigger_config");
   for (const s of schedules || []) {
+    if (surveyTimepoint.has(s.survey_id)) continue;
     const cfg = (s.trigger_config || {}) as { timepoint?: string; offset_days?: number };
     const tp = cfg.timepoint || (cfg.offset_days !== undefined ? `d${cfg.offset_days}` : "survey");
     surveyTimepoint.set(s.survey_id, tp);
