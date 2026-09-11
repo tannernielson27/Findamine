@@ -7,6 +7,8 @@ import {
   visibleFields,
   type FullProfile,
   type ViewerRelationship,
+  type ViewerContext,
+  type VisibilityOverrides,
 } from "@/lib/utils/privacy";
 import { getViewerRelationship, getViewerRelationships } from "@/lib/utils/viewer";
 import { sumLedger } from "@/lib/utils/points";
@@ -45,7 +47,7 @@ export async function GET(
 
     const { data: target, error } = await supabase
       .from("users")
-      .select("id, display_name, avatar_url, role, metadata, profile_visibility, deleted_at")
+      .select("id, display_name, avatar_url, role, metadata, profile_visibility, profile_visibility_overrides, deleted_at")
       .eq("id", id)
       .maybeSingle();
 
@@ -56,9 +58,14 @@ export async function GET(
     const relationship: ViewerRelationship =
       viewer.id === target.id ? "self" : await getViewerRelationship(viewer.id, target.id);
     const visibility = (target.profile_visibility || {}) as Record<string, string>;
+    // Per-person overrides (migration 057) apply to THIS viewer specifically.
+    const viewerCtx: ViewerContext = {
+      viewerId: viewer.id,
+      overrides: (target.profile_visibility_overrides || {}) as VisibilityOverrides,
+    };
 
     // Assemble the full profile (only fetch what could be visible to keep this cheap).
-    const allowed = new Set(visibleFields(visibility, relationship));
+    const allowed = new Set(visibleFields(visibility, relationship, viewerCtx));
 
     const [assessments, badges, points, sessions, friends] = await Promise.all([
       allowed.has("personality_scores")
@@ -133,7 +140,7 @@ export async function GET(
       friends_list: friendsList,
     };
 
-    const filtered = filterFullProfileForViewer(full, visibility, relationship);
+    const filtered = filterFullProfileForViewer(full, visibility, relationship, viewerCtx);
     const hiddenFields =
       relationship === "self"
         ? []

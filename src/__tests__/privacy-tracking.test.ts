@@ -107,3 +107,16 @@ describe("countOptionsShown (B4 objective option count)", () => {
     expect(countOptionsShown("bogus")).toBe(0);
   });
 });
+
+describe("countOptionsShown with the per-person layer (migration 057)", () => {
+  it("adds 3 options per person listed under complex only", () => {
+    expect(countOptionsShown("complex", 0)).toBe(32);
+    expect(countOptionsShown("complex", 5)).toBe(32 + 3 * 5);
+    expect(countOptionsShown("moderate", 5)).toBe(12);
+    expect(countOptionsShown("simple", 5)).toBe(4);
+  });
+
+  it("never subtracts for a negative count", () => {
+    expect(countOptionsShown("complex", -3)).toBe(32);
+  });
+});

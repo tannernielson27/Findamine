@@ -23,6 +23,8 @@ export interface SnapshotCondition {
    * fields carry so a caller that only knows those still writes a usable map.
    */
   conditions?: Record<string, string>;
+  /** Per-person override pairs in force (migration 057). Defaults to 0. */
+  overrideCount?: number;
 }
 
 /**
@@ -56,6 +58,7 @@ export function buildSnapshotRow(
     privacy_default: privacyDefault,
     conditions: condition?.conditions ?? legacyConditions(treatment, privacyDefault),
     unset: isUnset(visibility),
+    override_count: Math.max(0, Math.floor(condition?.overrideCount ?? 0)),
   };
 }
 

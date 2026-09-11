@@ -13,7 +13,7 @@ export async function GET(request: NextRequest) {
     const supabase = await createSupabaseServiceClient();
     const { data: profile, error } = await supabase
       .from("users")
-      .select("id, email, display_name, avatar_url, role, status, age_band, created_at, metadata, profile_visibility")
+      .select("id, email, display_name, avatar_url, role, status, age_band, created_at, metadata, profile_visibility, profile_visibility_overrides")
       .eq("id", user.id)
       .is("deleted_at", null)
       .single();

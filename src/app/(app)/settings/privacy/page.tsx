@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useEffect, useRef, useCallback } from "react";
+import { countOverrides, type VisibilityOverrides } from "@/lib/utils/privacy";
 import Link from "next/link";
 import {
   PROFILE_FIELDS, VISIBILITY_LABELS, CATEGORIES,
@@ -13,6 +14,15 @@ import {
 import { computePrivacyIndex } from "@/lib/utils/privacy-index";
 
 const VISIBILITY_LEVELS: VisibilityLevel[] = ["nobody", "team", "class", "everyone"];
+
+/** Someone a per-person rule can apply to (migration 057). */
+type OverridePerson = { id: string; name: string; kind: "friend" | "minion" };
+type OverrideChoice = "inherit" | "see" | "hidden";
+const OVERRIDE_CHOICES: { value: OverrideChoice; label: string }[] = [
+  { value: "inherit", label: "General" },
+  { value: "see", label: "Can see" },
+  { value: "hidden", label: "Hidden" },
+];
 
 // Baseline-survey gate (B2): the T1 timepoint must be answered after the
 // participant has seen the controls but before the first save.
@@ -44,6 +54,13 @@ export default function PrivacySettingsPage() {
   // Set only when the trigger endpoint reports a still-answerable T1 delivery
   // for THIS user; non-participants never get one, so the gate never blocks them.
   const [gateDeliveryId, setGateDeliveryId] = useState<string | null>(null);
+
+  // Per-person overrides (migration 057) — the 2014 "High" tier layer. Only
+  // rendered under the `complex` scheme; `people` are the accepted friends and
+  // crew members a rule can apply to.
+  const [overrides, setOverrides] = useState<VisibilityOverrides>({});
+  const [people, setPeople] = useState<OverridePerson[]>([]);
+  const overridesRef = useRef<VisibilityOverrides>({});
   const gateBlockedLoggedRef = useRef(false);
 
   // ── Research instrumentation (Task A3) ──────────────────────────
@@ -88,6 +105,33 @@ export default function PrivacySettingsPage() {
       }
     }
 
+    // Who a per-person rule can apply to: accepted friends + my crew. Best-effort.
+    async function fetchOverridePeople(myId: string): Promise<OverridePerson[]> {
+      const found = new Map<string, OverridePerson>();
+      try {
+        const [fr, rf] = await Promise.all([
+          fetch("/api/v1/social/friends").then((r) => (r.ok ? r.json() : { friends: [] })),
+          fetch("/api/v1/social/referrals").then((r) => (r.ok ? r.json() : { minions: [] })),
+        ]);
+        for (const row of fr.friends || []) {
+          if (row.status && row.status !== "accepted") continue;
+          const other = row.requester?.id === myId ? row.addressee : row.requester;
+          if (other?.id && other.id !== myId) {
+            found.set(other.id, { id: other.id, name: other.display_name || "A player", kind: "friend" });
+          }
+        }
+        for (const m of rf.minions || []) {
+          const u = m.user;
+          if (u?.id && !found.has(u.id)) {
+            found.set(u.id, { id: u.id, name: u.display_name || "A crew member", kind: "minion" });
+          }
+        }
+      } catch {
+        // the list is a convenience; the settings page must still work without it
+      }
+      return [...found.values()];
+    }
+
     fetch("/api/v1/auth/me")
       .then((r) => r.json())
       .then(async (data) => {
@@ -117,6 +161,17 @@ export default function PrivacySettingsPage() {
           currentRef.current = loaded;
           openedAtRef.current = Date.now();
 
+          // Per-person overrides and the people they can apply to (complex only).
+          const loadedOverrides = (data.user.profile_visibility_overrides || {}) as VisibilityOverrides;
+          setOverrides(loadedOverrides);
+          overridesRef.current = loadedOverrides;
+          let peopleListed = 0;
+          if (t === "complex" && data.user.id) {
+            const list = await fetchOverridePeople(data.user.id);
+            setPeople(list);
+            peopleListed = list.length;
+          }
+
           // Log that the privacy surface was viewed (denominator for engagement).
           logPrivacyEvent({
             event_type: "privacy_view",
@@ -127,7 +182,9 @@ export default function PrivacySettingsPage() {
               friction: f === "low" || f === "high" ? f : null,
               index: computePrivacyIndex(loaded),
               scheme: t,
-              options_shown: countOptionsShown(t), // objective option count (B4)
+              options_shown: countOptionsShown(t, peopleListed), // objective option count (B4 + C1)
+              people_listed: peopleListed,
+              override_count: countOverrides(loadedOverrides),
             },
           });
 
@@ -294,6 +351,7 @@ export default function PrivacySettingsPage() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         profile_visibility: visibility,
+        profile_visibility_overrides: overrides,
         privacy_meta: {
           duration_ms: Date.now() - openedAtRef.current,
           click_count: clickCountRef.current,
@@ -311,6 +369,29 @@ export default function PrivacySettingsPage() {
     setSaving(false);
     setSaved(true);
     setTimeout(() => setSaved(false), 2000);
+  }
+
+  /**
+   * Set, or clear, one person's rule for one field. "see" grants regardless of
+   * the audience tier, "hidden" denies regardless, "inherit" removes the rule.
+   * Stored as visibility levels (everyone / nobody) so enforcement stays uniform.
+   */
+  function setOverride(personId: string, fieldKey: string, choice: OverrideChoice) {
+    clickCountRef.current += 1;
+    const person = { ...(overrides[personId] || {}) };
+    if (choice === "inherit") {
+      delete person[fieldKey];
+      logFieldTouch("override:cleared", visibility[fieldKey] || "everyone", [fieldKey]);
+    } else {
+      const level: VisibilityLevel = choice === "see" ? "everyone" : "nobody";
+      person[fieldKey] = level;
+      logFieldTouch("override:set", level, [fieldKey]);
+    }
+    const next: VisibilityOverrides = { ...overrides };
+    if (Object.keys(person).length === 0) delete next[personId];
+    else next[personId] = person;
+    setOverrides(next);
+    overridesRef.current = next;
   }
 
   // Emit a lightweight per-interaction "touch" so the intra-session toggle trail
@@ -523,6 +604,73 @@ export default function PrivacySettingsPage() {
               <p className="text-xs text-gray-600 mt-1 italic">{field.educationalTip}</p>
             </div>
           ))}
+
+          {/* Per-person rules (migration 057): the layer that makes this the
+              2014 "High" tier. A rule here beats the general setting above for
+              that one person, in either direction. */}
+          <section className="rounded-lg border border-gray-200 p-3 mt-4" aria-labelledby="override-heading">
+            <p id="override-heading" className="text-sm font-medium text-gray-900">
+              Rules for specific people
+            </p>
+            <p className="text-xs text-gray-600 mb-2">
+              Fine-tune what each friend or crew member can see. A rule here overrides your
+              general setting for that person.
+            </p>
+            {people.length === 0 ? (
+              <p className="text-xs text-gray-500 italic">
+                Add friends or recruit crew members to set rules for them.
+              </p>
+            ) : (
+              <div className="space-y-2">
+                {people.map((person) => {
+                  const rules = overrides[person.id] || {};
+                  const active = Object.keys(rules).length;
+                  return (
+                    <details key={person.id} className="rounded border border-gray-200 bg-gray-50 p-2">
+                      <summary className="cursor-pointer text-xs font-medium text-gray-800">
+                        {person.name}{" "}
+                        <span className="text-gray-500">({person.kind === "minion" ? "crew" : "friend"})</span>
+                        {active > 0 && (
+                          <span className="ml-2 rounded bg-sky-100 px-1.5 text-sky-800">
+                            {active} {active === 1 ? "rule" : "rules"}
+                          </span>
+                        )}
+                      </summary>
+                      <div className="mt-2 space-y-1">
+                        {PROFILE_FIELDS.map((field) => {
+                          const current = rules[field.key];
+                          const choice: OverrideChoice =
+                            current === "nobody" ? "hidden" : current ? "see" : "inherit";
+                          return (
+                            <div key={field.key} className="flex items-center justify-between gap-2">
+                              <span className="text-xs text-gray-700">{field.label}</span>
+                              <div className="flex gap-1" role="group" aria-label={`${person.name}: ${field.label}`}>
+                                {OVERRIDE_CHOICES.map((c) => (
+                                  <button
+                                    key={c.value}
+                                    type="button"
+                                    aria-pressed={choice === c.value}
+                                    onClick={() => setOverride(person.id, field.key, c.value)}
+                                    className={`rounded px-2 py-1 text-xs transition ${
+                                      choice === c.value
+                                        ? "bg-sky-100 text-sky-800 border border-sky-300"
+                                        : "bg-white text-gray-700 border border-gray-200 hover:bg-gray-100"
+                                    }`}
+                                  >
+                                    {c.label}
+                                  </button>
+                                ))}
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </details>
+                  );
+                })}
+              </div>
+            )}
+          </section>
         </div>
       )}
 

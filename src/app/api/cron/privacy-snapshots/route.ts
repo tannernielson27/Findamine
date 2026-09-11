@@ -9,6 +9,7 @@
 import { NextRequest } from "next/server";
 import { createSupabaseServiceClient } from "@/lib/supabase/server";
 import { buildSnapshotRow } from "@/lib/services/privacy-snapshots";
+import { countOverrides, type VisibilityOverrides } from "@/lib/utils/privacy";
 import { conditionsFromMetadata } from "@/lib/utils/conditions";
 
 export const maxDuration = 60; // seconds
@@ -43,7 +44,7 @@ export async function GET(request: NextRequest) {
   // Current visibility + assigned condition for each participant.
   const { data: users } = await supabase
     .from("users")
-    .select("id, profile_visibility, metadata")
+    .select("id, profile_visibility, profile_visibility_overrides, metadata")
     .in("id", userIds);
 
   // Same row shape as the single-snapshot path, including the generic
@@ -55,6 +56,7 @@ export async function GET(request: NextRequest) {
       treatment: (metadata.privacy_treatment as string) ?? null,
       privacyDefault: (metadata.privacy_default as string) ?? null,
       conditions: conditionsFromMetadata(metadata),
+      overrideCount: countOverrides(u.profile_visibility_overrides as VisibilityOverrides | null),
     });
   });
 
