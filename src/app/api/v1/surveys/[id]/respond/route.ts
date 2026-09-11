@@ -1,6 +1,7 @@
 import { NextRequest } from "next/server";
 import { createSupabaseServiceClient } from "@/lib/supabase/server";
 import { getAuthUser, errorResponse, ApiError } from "@/lib/utils/api-auth";
+import { findInvalidChoiceAnswers } from "@/lib/services/survey-answers";
 
 export async function POST(
   request: NextRequest,
@@ -25,6 +26,23 @@ export async function POST(
     if (!delivery) throw new ApiError(404, "Delivery not found");
     if (delivery.status === "submitted") throw new ApiError(409, "Already submitted");
 
+    const answers = (body.answers && typeof body.answers === "object" ? body.answers : {}) as Record<
+      string,
+      unknown
+    >;
+
+    // Choice items must carry one of their configured option values; a bad
+    // value would otherwise be silently stored and skipped at analysis time.
+    const { data: choiceQuestions } = await supabase
+      .from("survey_questions")
+      .select("item_code, options")
+      .eq("survey_id", delivery.survey_id)
+      .eq("question_type", "multiple_choice");
+    const invalid = findInvalidChoiceAnswers(choiceQuestions || [], answers);
+    if (invalid.length > 0) {
+      throw new ApiError(400, `Invalid answer for: ${invalid.join(", ")}`);
+    }
+
     // Save response
     const { data: response, error } = await supabase
       .from("survey_responses")
@@ -32,7 +50,7 @@ export async function POST(
         delivery_id: deliveryId,
         survey_id: delivery.survey_id,
         user_id: user.id,
-        answers: body.answers || {},
+        answers,
       })
       .select()
       .single();

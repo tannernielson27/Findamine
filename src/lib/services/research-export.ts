@@ -8,7 +8,19 @@
  */
 
 import { createSupabaseServiceClient } from "@/lib/supabase/server";
-import { scoreAnswers, type ScorableQuestion } from "@/lib/services/survey-scoring";
+import {
+  scoreAnswers,
+  isScorableQuestionType,
+  type ScorableQuestion,
+} from "@/lib/services/survey-scoring";
+import {
+  idealFromAnswers,
+  settingsError,
+  pickSnapshotAt,
+  IDEAL_AUDIENCE_SUBSCALE,
+  type SettingsErrorResult,
+  type TimedVisibility,
+} from "@/lib/utils/settings-error";
 
 export type ExportFormat = "csv" | "tsv" | "json";
 
@@ -192,12 +204,20 @@ export async function generateResearchExport(config: ExportConfig): Promise<stri
   const indexT0 = new Map<string, number>();
   const indexFinal = new Map<string, number>();
   const finalAt = new Map<string, string>();
+  // Full visibility map per snapshot is kept so the ideal-audience block
+  // (migration 058) can be paired with the settings in force at submission.
+  const snapshotsByUser = new Map<string, TimedVisibility[]>();
   const { data: snapshots } = await supabase
     .from("privacy_index_snapshots")
-    .select("user_id, index_value, source, created_at")
+    .select("user_id, index_value, source, created_at, visibility")
     .in("user_id", userIds)
     .order("created_at", { ascending: true });
   for (const s of snapshots || []) {
+    if (!snapshotsByUser.has(s.user_id)) snapshotsByUser.set(s.user_id, []);
+    snapshotsByUser.get(s.user_id)!.push({
+      created_at: s.created_at,
+      visibility: (s.visibility ?? undefined) as Record<string, string> | undefined,
+    });
     if (s.source === "enrollment" && !indexT0.has(s.user_id)) {
       indexT0.set(s.user_id, Number(s.index_value));
     }
@@ -263,6 +283,9 @@ export async function generateResearchExport(config: ExportConfig): Promise<stri
   const subscalesByTp = new Map<string, Set<string>>();
   const statusByUserTp = new Map<string, Map<string, string>>(); // user → tp → status
   const scoreByUserTp = new Map<string, Map<string, number>>(); // user → `${tp}::${subscale}` → score
+  // Timepoints carrying the ideal-audience block, and each user's settings error there.
+  const idealTps = new Set<string>();
+  const settingsErrorByUserTp = new Map<string, Map<string, SettingsErrorResult>>();
 
   if (surveyIds.length > 0) {
     const { data: questions } = await supabase
@@ -273,7 +296,10 @@ export async function generateResearchExport(config: ExportConfig): Promise<stri
       if (!questionsBySurvey.has(q.survey_id)) questionsBySurvey.set(q.survey_id, []);
       questionsBySurvey.get(q.survey_id)!.push(q as ScorableQuestion);
       const tp = surveyTimepoint.get(q.survey_id)!;
-      if (q.subscale) {
+      if (q.subscale === IDEAL_AUDIENCE_SUBSCALE) idealTps.add(tp);
+      // Only Likert-style subscales get a mean column; choice blocks are
+      // exported through their own derived columns (settings_error_<tp>).
+      if (q.subscale && isScorableQuestionType(q.question_type)) {
         if (!subscalesByTp.has(tp)) subscalesByTp.set(tp, new Set());
         subscalesByTp.get(tp)!.add(q.subscale);
       }
@@ -304,8 +330,11 @@ export async function generateResearchExport(config: ExportConfig): Promise<stri
       .in("user_id", userIds)
       .in("survey_id", surveyIds)
       .order("created_at", { ascending: true });
+    const latestAnswerAt = new Map<string, string>();
     for (const r of responses || []) {
-      latestAnswers.set(`${r.user_id}::${r.survey_id}`, (r.answers || {}) as Record<string, number | string>);
+      const key = `${r.user_id}::${r.survey_id}`;
+      latestAnswers.set(key, (r.answers || {}) as Record<string, number | string>);
+      latestAnswerAt.set(key, r.created_at);
     }
     for (const [key, answers] of latestAnswers) {
       const [uid, surveyId] = key.split("::");
@@ -315,6 +344,19 @@ export async function generateResearchExport(config: ExportConfig): Promise<stri
       if (!scoreByUserTp.has(uid)) scoreByUserTp.set(uid, new Map());
       for (const sub of scoreAnswers(qs, answers)) {
         scoreByUserTp.get(uid)!.set(`${tp}::${sub.subscale}`, sub.score);
+      }
+
+      // Settings error: ideal audience (this response) vs actual settings in
+      // force when it was submitted (nearest snapshot).
+      if (idealTps.has(tp)) {
+        const ideal = idealFromAnswers(answers);
+        if (Object.keys(ideal).length > 0) {
+          const at = latestAnswerAt.get(key) || "";
+          const snap = pickSnapshotAt(snapshotsByUser.get(uid) || [], at);
+          const result = settingsError(ideal, snap?.visibility);
+          if (!settingsErrorByUserTp.has(uid)) settingsErrorByUserTp.set(uid, new Map());
+          settingsErrorByUserTp.get(uid)!.set(tp, result);
+        }
       }
     }
   }
@@ -339,6 +381,12 @@ export async function generateResearchExport(config: ExportConfig): Promise<stri
   for (const tp of timepoints) {
     surveyHeaders.push(`survey_${tp}_status`);
     for (const sub of sortedSubscalesByTp.get(tp) || []) surveyHeaders.push(`survey_${tp}_${sub}`);
+  }
+  // Ideal-audience block (migration 058): settings error and over-sharing count
+  // per timepoint that carries it.
+  const sortedIdealTps = [...idealTps].sort();
+  for (const tp of sortedIdealTps) {
+    surveyHeaders.push(`settings_error_${tp}`, `over_shared_${tp}`);
   }
 
   const headers = [
@@ -400,6 +448,12 @@ export async function generateResearchExport(config: ExportConfig): Promise<stri
         const v = uScore?.get(`${tp}::${sub}`);
         surveyValues.push(v === undefined ? "" : num(v, 2));
       }
+    }
+    const uErr = settingsErrorByUserTp.get(userId);
+    for (const tp of sortedIdealTps) {
+      const r = uErr?.get(tp);
+      surveyValues.push(r && r.error !== null ? r.error.toFixed(4) : "");
+      surveyValues.push(r ? num(r.over_shared) : "");
     }
 
     rows.push([

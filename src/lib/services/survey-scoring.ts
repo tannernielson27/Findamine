@@ -23,11 +23,24 @@ export interface ScorableQuestion {
   subscale: string | null;
 }
 
+/** Question types whose answers are numeric and belong in a subscale mean. */
+export const SCORABLE_QUESTION_TYPES = new Set(["likert_5", "likert_7", "slider"]);
+
+/** Whether a question's answers should enter Likert-style subscale means. */
+export function isScorableQuestionType(questionType: string | null | undefined): boolean {
+  // Legacy rows may have no type; treat them as Likert (historical behavior).
+  if (!questionType) return true;
+  return SCORABLE_QUESTION_TYPES.has(questionType);
+}
+
 /**
  * Pure survey scoring: group by subscale, apply reverse coding, average each
  * subscale. Extracted from the DB wrapper so the validity-critical math (a
  * classic source of ruined survey data when reverse coding is wrong) is
  * unit-testable without a database.
+ *
+ * Choice and free-text items (e.g. the `ideal_audience` block, migration 058)
+ * are skipped so they can never contaminate a subscale mean.
  */
 export function scoreAnswers(
   questions: ScorableQuestion[],
@@ -36,6 +49,7 @@ export function scoreAnswers(
   // Group questions by subscale
   const subscales = new Map<string, ScorableQuestion[]>();
   for (const q of questions) {
+    if (!isScorableQuestionType(q.question_type)) continue;
     const sub = q.subscale || "general";
     if (!subscales.has(sub)) subscales.set(sub, []);
     subscales.get(sub)!.push(q);

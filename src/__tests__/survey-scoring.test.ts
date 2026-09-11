@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { scoreAnswers, type ScorableQuestion } from "@/lib/services/survey-scoring";
+import { scoreAnswers, isScorableQuestionType, type ScorableQuestion } from "@/lib/services/survey-scoring";
 
 const q = (over: Partial<ScorableQuestion>): ScorableQuestion => ({
   item_code: "i1",
@@ -89,5 +89,25 @@ describe("scoreAnswers", () => {
   it("defaults an unlabeled subscale to 'general'", () => {
     const [res] = scoreAnswers([q({ item_code: "a", subscale: null })], { a: 3 });
     expect(res.subscale).toBe("general");
+  });
+});
+
+describe("choice items are excluded from subscale means (migration 058)", () => {
+  it("skips multiple_choice and free_text items and keeps Likert items", () => {
+    const questions = [
+      { item_code: "fatigue_1", question_type: "likert_7", scale_config: { min: 1, max: 7 }, reverse_coded: false, subscale: "privacy_fatigue" },
+      { item_code: "ideal_total_score", question_type: "multiple_choice", scale_config: null, reverse_coded: false, subscale: "ideal_audience" },
+      { item_code: "comment", question_type: "free_text", scale_config: null, reverse_coded: false, subscale: "ideal_audience" },
+    ];
+    const scores = scoreAnswers(questions, { fatigue_1: 6, ideal_total_score: "nobody", comment: "7" });
+    expect(scores.map((s) => s.subscale)).toEqual(["privacy_fatigue"]);
+    expect(scores[0].score).toBe(6);
+  });
+
+  it("classifies question types", () => {
+    expect(isScorableQuestionType("likert_7")).toBe(true);
+    expect(isScorableQuestionType("slider")).toBe(true);
+    expect(isScorableQuestionType("multiple_choice")).toBe(false);
+    expect(isScorableQuestionType(null)).toBe(true);
   });
 });
