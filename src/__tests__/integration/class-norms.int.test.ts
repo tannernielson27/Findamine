@@ -21,7 +21,7 @@ const SHOWN = { total_score: "everyone" };
 
 function seed(): SupabaseDouble {
   const student = (id: string, visibility: Record<string, string>, metadata: Record<string, unknown> = {}) => ({
-    id, auth_id: `auth-${id}`, role: "student", deleted_at: null, profile_visibility: visibility,
+    id, auth_id: `auth-${id}`, role: "teen", deleted_at: null, profile_visibility: visibility,
     profile_visibility_overrides: {}, metadata,
   });
   return installDouble(

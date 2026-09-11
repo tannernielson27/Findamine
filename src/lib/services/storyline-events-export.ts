@@ -15,6 +15,7 @@ import {
   type ExportConfig,
 } from "@/lib/services/research-export";
 import type { CheckinEventLite, NoticeEventLite } from "@/lib/services/storyline-export";
+import { fetchAllRows } from "@/lib/utils/paginate";
 
 export const STORYLINE_EVENT_HEADERS = [
   "participant_id",
@@ -106,32 +107,44 @@ export function buildStorylineEventRows(input: StorylineEventInput): string[][] 
 export async function generateStorylineEventsExport(config: ExportConfig): Promise<string> {
   const supabase = await createSupabaseServiceClient();
 
-  const { data: enrollments } = await supabase
-    .from("study_enrollments")
-    .select("user_id, enrolled_at")
-    .eq("study_id", config.studyId)
-    .is("withdrawn_at", null);
-  if (!enrollments || enrollments.length === 0) return "";
+  const enrollments = await fetchAllRows<{ user_id: string; enrolled_at: string }>((from, to) =>
+    supabase
+      .from("study_enrollments")
+      .select("user_id, enrolled_at")
+      .eq("study_id", config.studyId)
+      .is("withdrawn_at", null)
+      .order("user_id", { ascending: true })
+      .range(from, to)
+  );
+  if (enrollments.length === 0) return "";
 
-  const userIds = enrollments.map((e) => e.user_id as string);
+  const userIds = enrollments.map((e) => e.user_id);
   const pidByUser = new Map(userIds.map((uid, i) => [uid, participantId(i)]));
-  const enrolledAtByUser = new Map(enrollments.map((e) => [e.user_id as string, e.enrolled_at as string]));
+  const enrolledAtByUser = new Map(enrollments.map((e) => [e.user_id, e.enrolled_at]));
   const dimensionNames = await loadStudyDimensionNames(supabase, config.studyId);
 
-  const [{ data: notices }, { data: checkins }] = await Promise.all([
-    supabase
-      .from("notice_events")
-      .select("user_id, exposure_number, notice_style, audience_level, delivered_at, displayed_at, dismissed_at, dismissed_auto, link_clicked_at, dwell_ms, conditions")
-      .in("user_id", userIds),
-    supabase
-      .from("privacy_checkin_events")
-      .select("user_id, notification_id, cadence, exposure_number, action, reason, latency_ms, created_at, conditions")
-      .in("user_id", userIds),
+  const [notices, checkins] = await Promise.all([
+    fetchAllRows<NoticeEventLite>((from, to) =>
+      supabase
+        .from("notice_events")
+        .select("user_id, exposure_number, notice_style, audience_level, delivered_at, displayed_at, dismissed_at, dismissed_auto, link_clicked_at, dwell_ms, conditions")
+        .in("user_id", userIds)
+        .order("delivered_at", { ascending: true })
+        .range(from, to)
+    ),
+    fetchAllRows<CheckinEventLite>((from, to) =>
+      supabase
+        .from("privacy_checkin_events")
+        .select("user_id, notification_id, cadence, exposure_number, action, reason, latency_ms, created_at, conditions")
+        .in("user_id", userIds)
+        .order("created_at", { ascending: true })
+        .range(from, to)
+    ),
   ]);
 
   const rows = buildStorylineEventRows({
-    notices: (notices || []) as NoticeEventLite[],
-    checkins: (checkins || []) as CheckinEventLite[],
+    notices,
+    checkins,
     pidByUser,
     enrolledAtByUser,
     dimensionNames,

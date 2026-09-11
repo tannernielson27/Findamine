@@ -32,7 +32,8 @@ function seed() {
       { study_id: STUDY, user_id: "u2", enrolled_at: t0, withdrawn_at: null },
       { study_id: STUDY, user_id: "u3", enrolled_at: t0, withdrawn_at: daysAgo(2) },
     ],
-    users: ["u1", "u2", "u3"].map((id) => ({ id, email: `${id}@example.edu`, role: "student", age_band: "adult", created_at: t0 })),
+    users: ["u1", "u2", "u3"].map((id) => ({ id, email: `${id}@example.edu`, role: "teen", created_at: t0 })),
+    user_profiles: ["u1", "u2", "u3"].map((id) => ({ user_id: id, effective_band: "adult" })),
     dimension_assignments: [
       { user_id: "u1", dimension_id: "d-ss", level: "chosen" },
       { user_id: "u1", dimension_id: "d-ns", level: "contextual" },

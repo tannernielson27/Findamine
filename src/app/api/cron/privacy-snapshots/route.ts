@@ -11,6 +11,7 @@ import { createSupabaseServiceClient } from "@/lib/supabase/server";
 import { buildSnapshotRow } from "@/lib/services/privacy-snapshots";
 import { countOverrides, type VisibilityOverrides } from "@/lib/utils/privacy";
 import { conditionsFromMetadata } from "@/lib/utils/conditions";
+import { fetchAllByIds, fetchAllRows } from "@/lib/utils/paginate";
 
 export const maxDuration = 60; // seconds
 
@@ -31,25 +32,40 @@ export async function GET(request: NextRequest) {
   const supabase = await createSupabaseServiceClient();
 
   // Distinct enrolled, non-withdrawn participants across active studies.
-  const { data: enrollments } = await supabase
-    .from("study_enrollments")
-    .select("user_id")
-    .is("withdrawn_at", null);
+  // Paginated and chunked: a capped read would silently skip participants,
+  // leaving holes in the trajectory that look like missing data.
+  const enrollments = await fetchAllRows<{ user_id: string }>((from, to) =>
+    supabase
+      .from("study_enrollments")
+      .select("user_id")
+      .is("withdrawn_at", null)
+      .order("user_id", { ascending: true })
+      .range(from, to)
+  );
 
-  const userIds = [...new Set((enrollments || []).map((e) => e.user_id))];
+  const userIds = [...new Set(enrollments.map((e) => e.user_id))];
   if (userIds.length === 0) {
     return Response.json({ participants: 0, snapshots: 0 });
   }
 
   // Current visibility + assigned condition for each participant.
-  const { data: users } = await supabase
-    .from("users")
-    .select("id, profile_visibility, profile_visibility_overrides, metadata")
-    .in("id", userIds);
+  const users = await fetchAllByIds<{
+    id: string;
+    profile_visibility: unknown;
+    profile_visibility_overrides: unknown;
+    metadata: unknown;
+  }>(userIds, (ids, from, to) =>
+    supabase
+      .from("users")
+      .select("id, profile_visibility, profile_visibility_overrides, metadata")
+      .in("id", ids)
+      .order("id", { ascending: true })
+      .range(from, to)
+  );
 
   // Same row shape as the single-snapshot path, including the generic
   // `conditions` map (migration 053) alongside the two legacy columns.
-  const rows = (users || []).map((u) => {
+  const rows = users.map((u) => {
     const visibility = (u.profile_visibility || {}) as Record<string, string>;
     const metadata = (u.metadata || {}) as Record<string, unknown>;
     return buildSnapshotRow(u.id, visibility, "scheduled", {

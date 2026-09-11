@@ -22,6 +22,7 @@ import {
   type TimedVisibility,
 } from "@/lib/utils/settings-error";
 import { loadStorylineColumns } from "@/lib/services/storyline-export";
+import { fetchAllByIds, fetchAllRows } from "@/lib/utils/paginate";
 
 export type ExportFormat = "csv" | "tsv" | "json";
 
@@ -130,34 +131,74 @@ export function conditionValues(
 export async function generateResearchExport(config: ExportConfig): Promise<string> {
   const supabase = await createSupabaseServiceClient();
 
-  // Enrolled, non-withdrawn participants.
-  const { data: enrollments } = await supabase
-    .from("study_enrollments")
-    .select("user_id, enrolled_at")
-    .eq("study_id", config.studyId)
-    .is("withdrawn_at", null);
+  // Every read below is paginated: PostgREST caps a response at 1000 rows and
+  // does not say so, which silently truncated the trajectory and made the
+  // "final" index the earliest one (found by the H9 dry run). Reads filtered by
+  // participant are also chunked, so the id list never overflows the URL.
+  const enrollments = await fetchAllRows<{ user_id: string; enrolled_at: string }>((from, to) =>
+    supabase
+      .from("study_enrollments")
+      .select("user_id, enrolled_at")
+      .eq("study_id", config.studyId)
+      .is("withdrawn_at", null)
+      .order("user_id", { ascending: true })
+      .range(from, to)
+  );
 
-  if (!enrollments || enrollments.length === 0) return "";
+  if (enrollments.length === 0) return "";
 
   const userIds = enrollments.map((e) => e.user_id);
 
   // Demographics (no PII).
-  const { data: users } = await supabase
-    .from("users")
-    .select("id, role, age_band, created_at")
-    .in("id", userIds);
+  const users = await fetchAllByIds<{ id: string; role: string | null; created_at: string }>(
+    userIds,
+    (ids, from, to) =>
+      supabase
+        .from("users")
+        .select("id, role, created_at")
+        .in("id", ids)
+        .order("id", { ascending: true })
+        .range(from, to)
+  );
+
+  // The age band lives on user_profiles.effective_band. Selecting age_band from
+  // `users` (no such column) failed the query above outright, which emptied the
+  // role column too — every participant exported blank on both.
+  const profiles = await fetchAllByIds<{ user_id: string; effective_band: string | null }>(
+    userIds,
+    (ids, from, to) =>
+      supabase
+        .from("user_profiles")
+        .select("user_id, effective_band")
+        .in("user_id", ids)
+        .order("user_id", { ascending: true })
+        .range(from, to)
+  );
+  const bandByUser = new Map(profiles.map((p) => [p.user_id, p.effective_band ?? ""]));
 
   // Treatment assignments.
-  const { data: assignments } = await supabase
-    .from("dimension_assignments")
-    .select("user_id, level, treatment_dimensions(name)")
-    .in("user_id", userIds);
+  const assignments = await fetchAllByIds<{ user_id: string; level: string; treatment_dimensions: unknown }>(
+    userIds,
+    (ids, from, to) =>
+      supabase
+        .from("dimension_assignments")
+        .select("user_id, level, treatment_dimensions(name)")
+        .in("user_id", ids)
+        .order("user_id", { ascending: true })
+        .range(from, to)
+  );
 
   // Play sessions → hunts completed + map session→user.
-  const { data: sessions } = await supabase
-    .from("play_sessions")
-    .select("id, user_id, status")
-    .in("user_id", userIds);
+  const sessions = await fetchAllByIds<{ id: string; user_id: string; status: string }>(
+    userIds,
+    (ids, from, to) =>
+      supabase
+        .from("play_sessions")
+        .select("id, user_id, status")
+        .in("user_id", ids)
+        .order("id", { ascending: true })
+        .range(from, to)
+  );
 
   const sessionToUser = new Map<string, string>();
   const huntsCompleted = new Map<string, number>();
@@ -168,13 +209,19 @@ export async function generateResearchExport(config: ExportConfig): Promise<stri
 
   // Find completions (via session) → finds completed.
   const findsCompleted = new Map<string, number>();
-  const sessionIds = (sessions || []).map((s) => s.id);
+  const sessionIds = sessions.map((s) => s.id);
   if (sessionIds.length > 0) {
-    const { data: finds } = await supabase
-      .from("find_completions")
-      .select("play_session_id, completed_at")
-      .in("play_session_id", sessionIds);
-    for (const f of finds || []) {
+    const finds = await fetchAllByIds<{ play_session_id: string; completed_at: string | null }>(
+      sessionIds,
+      (ids, from, to) =>
+        supabase
+          .from("find_completions")
+          .select("play_session_id, completed_at")
+          .in("play_session_id", ids)
+          .order("play_session_id", { ascending: true })
+          .range(from, to)
+    );
+    for (const f of finds) {
       if (!f.completed_at) continue;
       const uid = sessionToUser.get(f.play_session_id);
       if (uid) inc(findsCompleted, uid);
@@ -184,22 +231,32 @@ export async function generateResearchExport(config: ExportConfig): Promise<stri
   // Points ledger → total + referral points.
   const totalPoints = new Map<string, number>();
   const referralPoints = new Map<string, number>();
-  const { data: ledger } = await supabase
-    .from("points_ledger")
-    .select("user_id, amount, source_type")
-    .in("user_id", userIds);
-  for (const p of ledger || []) {
+  const ledger = await fetchAllByIds<{ user_id: string; amount: number | null; source_type: string }>(
+    userIds,
+    (ids, from, to) =>
+      supabase
+        .from("points_ledger")
+        .select("user_id, amount, source_type")
+        .in("user_id", ids)
+        .order("user_id", { ascending: true })
+        .range(from, to)
+  );
+  for (const p of ledger) {
     inc(totalPoints, p.user_id, p.amount || 0);
     if (p.source_type === "referral") inc(referralPoints, p.user_id, p.amount || 0);
   }
 
   // Minion counts (as recruiter).
   const minionCount = new Map<string, number>();
-  const { data: minions } = await supabase
-    .from("minion_links")
-    .select("recruiter_id")
-    .in("recruiter_id", userIds);
-  for (const m of minions || []) inc(minionCount, m.recruiter_id);
+  const minions = await fetchAllByIds<{ recruiter_id: string }>(userIds, (ids, from, to) =>
+    supabase
+      .from("minion_links")
+      .select("recruiter_id")
+      .in("recruiter_id", ids)
+      .order("recruiter_id", { ascending: true })
+      .range(from, to)
+  );
+  for (const m of minions) inc(minionCount, m.recruiter_id);
 
   // Privacy-index trajectory → t0 + final.
   const indexT0 = new Map<string, number>();
@@ -208,12 +265,21 @@ export async function generateResearchExport(config: ExportConfig): Promise<stri
   // Full visibility map per snapshot is kept so the ideal-audience block
   // (migration 058) can be paired with the settings in force at submission.
   const snapshotsByUser = new Map<string, TimedVisibility[]>();
-  const { data: snapshots } = await supabase
-    .from("privacy_index_snapshots")
-    .select("user_id, index_value, source, created_at, visibility")
-    .in("user_id", userIds)
-    .order("created_at", { ascending: true });
-  for (const s of snapshots || []) {
+  const snapshots = await fetchAllByIds<{
+    user_id: string;
+    index_value: number | string;
+    source: string;
+    created_at: string;
+    visibility: unknown;
+  }>(userIds, (ids, from, to) =>
+    supabase
+      .from("privacy_index_snapshots")
+      .select("user_id, index_value, source, created_at, visibility")
+      .in("user_id", ids)
+      .order("created_at", { ascending: true })
+      .range(from, to)
+  );
+  for (const s of snapshots) {
     if (!snapshotsByUser.has(s.user_id)) snapshotsByUser.set(s.user_id, []);
     snapshotsByUser.get(s.user_id)!.push({
       created_at: s.created_at,
@@ -239,12 +305,20 @@ export async function generateResearchExport(config: ExportConfig): Promise<stri
   const firstChangeAt = new Map<string, string>();
   const totalEvents = new Map<string, number>();
   const changeDeltasByUser = new Map<string, ExportFieldDelta[][]>();
-  const { data: pEvents } = await supabase
-    .from("privacy_events")
-    .select("user_id, event_type, metadata, created_at")
-    .in("user_id", userIds)
-    .order("created_at", { ascending: true });
-  for (const e of pEvents || []) {
+  const pEvents = await fetchAllByIds<{
+    user_id: string;
+    event_type: string;
+    metadata: unknown;
+    created_at: string;
+  }>(userIds, (ids, from, to) =>
+    supabase
+      .from("privacy_events")
+      .select("user_id, event_type, metadata, created_at")
+      .in("user_id", ids)
+      .order("created_at", { ascending: true })
+      .range(from, to)
+  );
+  for (const e of pEvents) {
     inc(totalEvents, e.user_id);
     if (e.event_type === "privacy_change") {
       inc(changeCount, e.user_id);
@@ -310,12 +384,18 @@ export async function generateResearchExport(config: ExportConfig): Promise<stri
 
     // Delivery status per (user, timepoint): prefer the most-complete state.
     const statusRank: Record<string, number> = { submitted: 4, opened: 3, expired: 2, pending: 1 };
-    const { data: deliveries } = await supabase
-      .from("survey_deliveries")
-      .select("survey_id, user_id, status")
-      .in("user_id", userIds)
-      .in("survey_id", surveyIds);
-    for (const d of deliveries || []) {
+    const deliveries = await fetchAllByIds<{ survey_id: string; user_id: string; status: string }>(
+      userIds,
+      (ids, from, to) =>
+        supabase
+          .from("survey_deliveries")
+          .select("survey_id, user_id, status")
+          .in("user_id", ids)
+          .in("survey_id", surveyIds)
+          .order("user_id", { ascending: true })
+          .range(from, to)
+    );
+    for (const d of deliveries) {
       const tp = surveyTimepoint.get(d.survey_id);
       if (!tp) continue;
       if (!statusByUserTp.has(d.user_id)) statusByUserTp.set(d.user_id, new Map());
@@ -327,14 +407,22 @@ export async function generateResearchExport(config: ExportConfig): Promise<stri
 
     // Latest response per (user, survey) → score by subscale.
     const latestAnswers = new Map<string, Record<string, number | string>>(); // `${user}::${survey}`
-    const { data: responses } = await supabase
-      .from("survey_responses")
-      .select("survey_id, user_id, answers, created_at")
-      .in("user_id", userIds)
-      .in("survey_id", surveyIds)
-      .order("created_at", { ascending: true });
+    const responses = await fetchAllByIds<{
+      survey_id: string;
+      user_id: string;
+      answers: unknown;
+      created_at: string;
+    }>(userIds, (ids, from, to) =>
+      supabase
+        .from("survey_responses")
+        .select("survey_id, user_id, answers, created_at")
+        .in("user_id", ids)
+        .in("survey_id", surveyIds)
+        .order("created_at", { ascending: true })
+        .range(from, to)
+    );
     const latestAnswerAt = new Map<string, string>();
-    for (const r of responses || []) {
+    for (const r of responses) {
       const key = `${r.user_id}::${r.survey_id}`;
       latestAnswers.set(key, (r.answers || {}) as Record<string, number | string>);
       latestAnswerAt.set(key, r.created_at);
@@ -465,7 +553,7 @@ export async function generateResearchExport(config: ExportConfig): Promise<stri
 
     rows.push([
       pid,
-      user?.age_band || "",
+      bandByUser.get(userId) || "",
       user?.role || "",
       enrollment?.enrolled_at || "",
       ...treatmentValues,
@@ -510,13 +598,17 @@ export async function generateResearchExport(config: ExportConfig): Promise<stri
 export async function generateTrajectoryExport(config: ExportConfig): Promise<string> {
   const supabase = await createSupabaseServiceClient();
 
-  const { data: enrollments } = await supabase
-    .from("study_enrollments")
-    .select("user_id, enrolled_at")
-    .eq("study_id", config.studyId)
-    .is("withdrawn_at", null);
+  const enrollments = await fetchAllRows<{ user_id: string; enrolled_at: string }>((from, to) =>
+    supabase
+      .from("study_enrollments")
+      .select("user_id, enrolled_at")
+      .eq("study_id", config.studyId)
+      .is("withdrawn_at", null)
+      .order("user_id", { ascending: true })
+      .range(from, to)
+  );
 
-  if (!enrollments || enrollments.length === 0) return "";
+  if (enrollments.length === 0) return "";
 
   // Stable P#### ids matching the participant-level export (enrollment order).
   const userIds = enrollments.map((e) => e.user_id);
@@ -525,11 +617,23 @@ export async function generateTrajectoryExport(config: ExportConfig): Promise<st
   userIds.forEach((uid, i) => pidByUser.set(uid, participantId(i)));
   for (const e of enrollments) enrolledAtByUser.set(e.user_id, e.enrolled_at);
 
-  const { data: snapshots } = await supabase
-    .from("privacy_index_snapshots")
-    .select("user_id, index_value, source, unset, treatment, privacy_default, conditions, created_at")
-    .in("user_id", userIds)
-    .order("created_at", { ascending: true });
+  const snapshots = await fetchAllByIds<{
+    user_id: string;
+    index_value: number | string;
+    source: string | null;
+    unset: boolean | null;
+    treatment: string | null;
+    privacy_default: string | null;
+    conditions: unknown;
+    created_at: string;
+  }>(userIds, (ids, from, to) =>
+    supabase
+      .from("privacy_index_snapshots")
+      .select("user_id, index_value, source, unset, treatment, privacy_default, conditions, created_at")
+      .in("user_id", ids)
+      .order("created_at", { ascending: true })
+      .range(from, to)
+  );
 
   // One treatment_<dimension> column per dimension linked to the study, read
   // from the row's own `conditions` map (legacy columns as fallback).
@@ -546,7 +650,7 @@ export async function generateTrajectoryExport(config: ExportConfig): Promise<st
   ];
 
   const rows: string[][] = [];
-  for (const s of snapshots || []) {
+  for (const s of snapshots) {
     const pid = pidByUser.get(s.user_id);
     if (!pid) continue;
     const enrolledAt = enrolledAtByUser.get(s.user_id);
@@ -602,13 +706,17 @@ export async function loadStudyDimensionNames(
 export async function generateEventsExport(config: ExportConfig): Promise<string> {
   const supabase = await createSupabaseServiceClient();
 
-  const { data: enrollments } = await supabase
-    .from("study_enrollments")
-    .select("user_id, enrolled_at")
-    .eq("study_id", config.studyId)
-    .is("withdrawn_at", null);
+  const enrollments = await fetchAllRows<{ user_id: string; enrolled_at: string }>((from, to) =>
+    supabase
+      .from("study_enrollments")
+      .select("user_id, enrolled_at")
+      .eq("study_id", config.studyId)
+      .is("withdrawn_at", null)
+      .order("user_id", { ascending: true })
+      .range(from, to)
+  );
 
-  if (!enrollments || enrollments.length === 0) return "";
+  if (enrollments.length === 0) return "";
 
   const userIds = enrollments.map((e) => e.user_id);
   const pidByUser = new Map<string, string>();
@@ -618,13 +726,28 @@ export async function generateEventsExport(config: ExportConfig): Promise<string
 
   const dimensionNames = await loadStudyDimensionNames(supabase, config.studyId);
 
-  const { data: events } = await supabase
-    .from("privacy_events")
-    .select(
-      "user_id, event_type, page, duration_ms, click_count, session_id, treatment, privacy_default, conditions, metadata, created_at"
-    )
-    .in("user_id", userIds)
-    .order("created_at", { ascending: true });
+  const events = await fetchAllByIds<{
+    user_id: string;
+    event_type: string | null;
+    page: string | null;
+    duration_ms: number | null;
+    click_count: number | null;
+    session_id: string | null;
+    treatment: string | null;
+    privacy_default: string | null;
+    conditions: unknown;
+    metadata: unknown;
+    created_at: string;
+  }>(userIds, (ids, from, to) =>
+    supabase
+      .from("privacy_events")
+      .select(
+        "user_id, event_type, page, duration_ms, click_count, session_id, treatment, privacy_default, conditions, metadata, created_at"
+      )
+      .in("user_id", ids)
+      .order("created_at", { ascending: true })
+      .range(from, to)
+  );
 
   const headers = [
     "participant_id",
@@ -645,7 +768,7 @@ export async function generateEventsExport(config: ExportConfig): Promise<string
   ];
 
   const rows: string[][] = [];
-  for (const e of events || []) {
+  for (const e of events) {
     const pid = pidByUser.get(e.user_id);
     if (!pid) continue;
     const enrolledAt = enrolledAtByUser.get(e.user_id);

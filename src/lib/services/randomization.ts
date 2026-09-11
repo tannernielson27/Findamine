@@ -17,6 +17,7 @@
  */
 
 import { createSupabaseServiceClient } from "@/lib/supabase/server";
+import { fetchAllByIds, fetchAllRows } from "@/lib/utils/paginate";
 
 export interface RandomizationConfig {
   studyId: string;
@@ -177,14 +178,16 @@ export async function assignParticipant(
     .select("effective_band")
     .eq("user_id", userId)
     .maybeSingle();
+  // Age band comes from user_profiles.effective_band only — `users` has no
+  // age_band column, and selecting one would fail this whole query.
   const { data: user } = await supabase
     .from("users")
-    .select("school_id, age_band")
+    .select("school_id")
     .eq("id", userId)
     .single();
   const myStratum = stratumKeyFor(
     config.stratifyBy,
-    userProfile?.effective_band || user?.age_band,
+    userProfile?.effective_band,
     user?.school_id
   );
 
@@ -199,13 +202,19 @@ export async function assignParticipant(
   const cellCounts = new Map<string, number>();
   for (const c of cells) cellCounts.set(cellKey(c), 0);
 
-  const { data: allAssign } = await supabase
-    .from("dimension_assignments")
-    .select("user_id, dimension_id, level")
-    .in("dimension_id", dims.map((d) => d.id));
+  // Paginated: a truncated read here would under-count filled cells and skew
+  // every subsequent allocation (PostgREST caps responses at 1000 rows).
+  const allAssign = await fetchAllRows<{ user_id: string; dimension_id: string; level: string }>((from, to) =>
+    supabase
+      .from("dimension_assignments")
+      .select("user_id, dimension_id, level")
+      .in("dimension_id", dims.map((d) => d.id))
+      .order("user_id", { ascending: true })
+      .range(from, to)
+  );
 
   const byUser = new Map<string, Map<string, string>>();
-  for (const a of allAssign || []) {
+  for (const a of allAssign) {
     if (!byUser.has(a.user_id)) byUser.set(a.user_id, new Map());
     byUser.get(a.user_id)!.set(a.dimension_id, a.level);
   }
@@ -215,22 +224,31 @@ export async function assignParticipant(
     .map(([uid]) => uid);
 
   if (assignedUserIds.length > 0) {
-    const [{ data: urows }, { data: uprofiles }] = await Promise.all([
-      supabase.from("users").select("id, school_id, age_band").in("id", assignedUserIds),
-      supabase.from("user_profiles").select("user_id, effective_band").in("user_id", assignedUserIds),
+    const [urows, uprofiles] = await Promise.all([
+      fetchAllByIds<{ id: string; school_id: string | null }>(assignedUserIds, (ids, from, to) =>
+        supabase.from("users").select("id, school_id").in("id", ids).order("id", { ascending: true }).range(from, to)
+      ),
+      fetchAllByIds<{ user_id: string; effective_band: string | null }>(assignedUserIds, (ids, from, to) =>
+        supabase
+          .from("user_profiles")
+          .select("user_id, effective_band")
+          .in("user_id", ids)
+          .order("user_id", { ascending: true })
+          .range(from, to)
+      ),
     ]);
     const bandByUser = new Map<string, string>();
-    for (const p of uprofiles || []) {
+    for (const p of uprofiles) {
       if (p.effective_band) bandByUser.set(p.user_id, p.effective_band);
     }
-    const rowByUser = new Map<string, { school_id: string | null; age_band: string | null }>();
-    for (const r of urows || []) rowByUser.set(r.id, { school_id: r.school_id, age_band: r.age_band });
+    const rowByUser = new Map<string, { school_id: string | null }>();
+    for (const r of urows) rowByUser.set(r.id, { school_id: r.school_id });
 
     for (const uid of assignedUserIds) {
       const row = rowByUser.get(uid);
       const stratum = stratumKeyFor(
         config.stratifyBy,
-        bandByUser.get(uid) || row?.age_band,
+        bandByUser.get(uid),
         row?.school_id
       );
       if (stratum !== myStratum) continue;

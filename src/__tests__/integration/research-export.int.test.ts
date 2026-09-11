@@ -39,9 +39,15 @@ function seed(): SupabaseDouble {
       { study_id: STUDY, user_id: "u3", enrolled_at: t0, withdrawn_at: daysAgo(1) },
     ],
     users: [
-      { id: "u1", email: "zelda@example.edu", display_name: "Zelda", role: "student", age_band: "adult", created_at: t0 },
-      { id: "u2", email: "bartholomew@example.edu", display_name: "Bartholomew", role: "student", age_band: "adult", created_at: t0 },
-      { id: "u3", email: "cyrus@example.edu", display_name: "Cyrus", role: "student", age_band: "adult", created_at: t0 },
+      // "teen" is a real users.role value; "student" is not one the CHECK allows.
+      { id: "u1", email: "zelda@example.edu", display_name: "Zelda", role: "teen", created_at: t0 },
+      { id: "u2", email: "bartholomew@example.edu", display_name: "Bartholomew", role: "teen", created_at: t0 },
+      { id: "u3", email: "cyrus@example.edu", display_name: "Cyrus", role: "teen", created_at: t0 },
+    ],
+    // The age band lives here, not on users — the export reads effective_band.
+    user_profiles: [
+      { user_id: "u1", age_band: "adult", effective_band: "adult" },
+      { user_id: "u2", age_band: "teen", age_band_override: "adult", effective_band: "adult" },
     ],
     dimension_assignments: [
       { user_id: "u1", dimension_id: D_CPX, level: "complex" },
@@ -119,6 +125,9 @@ describe("research exports against the Supabase double", () => {
     }
 
     const u1 = rows[0];
+    // Demographics come from users + user_profiles.effective_band.
+    expect(u1.role).toBe("teen");
+    expect(u1.age_band).toBe("adult");
     expect(u1.treatment_privacy_control_complexity).toBe("complex");
     expect(u1.treatment_privacy_default).toBe("public");
     expect(u1.total_hunts_completed).toBe("1");

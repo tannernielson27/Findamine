@@ -36,7 +36,7 @@ describe("PUT /api/v1/auth/profile privacy-change logging", () => {
       {
         users: [
           {
-            id: "u1", auth_id: "auth-1", role: "student", deleted_at: null, display_name: "Ada",
+            id: "u1", auth_id: "auth-1", role: "teen", deleted_at: null, display_name: "Ada",
             profile_visibility: { ...ALL_EVERYONE },
             profile_visibility_overrides: {},
             metadata: {
@@ -44,7 +44,7 @@ describe("PUT /api/v1/auth/profile privacy-change logging", () => {
               dim_privacy_control_complexity: "moderate", dim_privacy_default: "public", dim_privacy_friction: "low",
             },
           },
-          { id: "friend", auth_id: "auth-2", role: "student", deleted_at: null },
+          { id: "friend", auth_id: "auth-2", role: "teen", deleted_at: null },
         ],
         friend_connections: [{ requester_id: "friend", addressee_id: "u1", status: "accepted" }],
         minion_links: [],

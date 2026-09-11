@@ -138,8 +138,8 @@ describe("POST /api/v1/research/checkin-events against the Supabase double", () 
     db = installDouble(
       {
         users: [
-          { id: "u1", auth_id: "auth-1", role: "student", metadata: { dim_privacy_checkin: "biweekly" } },
-          { id: "u2", auth_id: "auth-2", role: "student", metadata: {} },
+          { id: "u1", auth_id: "auth-1", role: "teen", metadata: { dim_privacy_checkin: "biweekly" } },
+          { id: "u2", auth_id: "auth-2", role: "teen", metadata: {} },
         ],
         study_enrollments: [{ study_id: "s", user_id: "u1", enrolled_at: daysAgo(20), withdrawn_at: null }],
         notifications: [

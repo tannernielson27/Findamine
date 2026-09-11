@@ -9,6 +9,7 @@
 
 import type { createSupabaseServiceClient } from "@/lib/supabase/server";
 import { classifyChange, type FieldDelta } from "@/lib/utils/privacy-tracking";
+import { fetchAllRows } from "@/lib/utils/paginate";
 import { NORM_FIELD } from "@/lib/utils/class-norms";
 import { SCHEMES } from "@/lib/utils/scheme-selection";
 
@@ -247,10 +248,12 @@ function groupByUser<T extends { user_id: string }>(rows: readonly T[]): Map<str
   return out;
 }
 
-async function rowsOf<T>(query: PromiseLike<{ data: unknown }> | null): Promise<T[]> {
-  if (!query) return [];
-  const { data } = await query;
-  return (data ?? []) as T[];
+type PageFn<T> = (from: number, to: number) => PromiseLike<{ data: T[] | null; error: { message: string } | null }>;
+
+/** Read every row of a storyline table, or nothing when the storyline is off. */
+async function rowsOf<T>(page: PageFn<T> | null): Promise<T[]> {
+  if (!page) return [];
+  return fetchAllRows<T>(page);
 }
 
 /** Storyline columns for the participants export, driven by the study's dimensions. */
@@ -268,40 +271,56 @@ export async function loadStorylineColumns(
   if (!on.scheme && !on.notices && !on.checkins && !on.norms) return { headers: [], valuesFor: () => [] };
 
   const [events, selections, notices, checkins, exposures] = await Promise.all([
-    rowsOf<PrivacyEventLite>(
+    rowsOf<PrivacyEventLite>((from, to) =>
       supabase
         .from("privacy_events")
         .select("user_id, event_type, metadata, norm_exposure_id, created_at")
         .in("user_id", userIds)
         .order("created_at", { ascending: true })
+        .range(from, to)
     ),
     rowsOf<SchemeSelectionLite>(
       on.scheme
-        ? supabase
-            .from("scheme_selections")
-            .select("user_id, source, scheme_before, scheme_after, ratings, display_order, dwell_ms")
-            .in("user_id", userIds)
+        ? (from, to) =>
+            supabase
+              .from("scheme_selections")
+              .select("user_id, source, scheme_before, scheme_after, ratings, display_order, dwell_ms")
+              .in("user_id", userIds)
+              .order("created_at", { ascending: true })
+              .range(from, to)
         : null
     ),
     rowsOf<NoticeEventLite>(
       on.notices
-        ? supabase
-            .from("notice_events")
-            .select("user_id, exposure_number, notice_style, audience_level, delivered_at, displayed_at, dismissed_at, dismissed_auto, link_clicked_at, dwell_ms")
-            .in("user_id", userIds)
+        ? (from, to) =>
+            supabase
+              .from("notice_events")
+              .select("user_id, exposure_number, notice_style, audience_level, delivered_at, displayed_at, dismissed_at, dismissed_auto, link_clicked_at, dwell_ms")
+              .in("user_id", userIds)
+              .order("delivered_at", { ascending: true })
+              .range(from, to)
         : null
     ),
     rowsOf<CheckinEventLite>(
       on.checkins
-        ? supabase
-            .from("privacy_checkin_events")
-            .select("user_id, notification_id, cadence, exposure_number, action, reason, latency_ms, created_at")
-            .in("user_id", userIds)
+        ? (from, to) =>
+            supabase
+              .from("privacy_checkin_events")
+              .select("user_id, notification_id, cadence, exposure_number, action, reason, latency_ms, created_at")
+              .in("user_id", userIds)
+              .order("created_at", { ascending: true })
+              .range(from, to)
         : null
     ),
     rowsOf<NormExposureLite>(
       on.norms
-        ? supabase.from("norm_exposures").select("id, user_id, share_shown, created_at").in("user_id", userIds)
+        ? (from, to) =>
+            supabase
+              .from("norm_exposures")
+              .select("id, user_id, share_shown, created_at")
+              .in("user_id", userIds)
+              .order("created_at", { ascending: true })
+              .range(from, to)
         : null
     ),
   ]);

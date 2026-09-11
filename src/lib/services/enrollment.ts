@@ -232,11 +232,20 @@ export async function enrollParticipant(userId: string): Promise<EnrollmentResul
     stage = "load_user";
     const { data: userRow } = await supabase
       .from("users")
-      .select("age_band, metadata, profile_visibility")
+      .select("metadata, profile_visibility")
       .eq("id", userId)
       .maybeSingle();
+    // The age band lives on user_profiles.effective_band; `users` has no such
+    // column. Selecting one there fails the whole query in PostgREST, which
+    // this code would have read as "no user" — silently discarding the
+    // participant's existing metadata on the merge below.
+    const { data: profileRow } = await supabase
+      .from("user_profiles")
+      .select("effective_band")
+      .eq("user_id", userId)
+      .maybeSingle();
 
-    const ageBand = userRow?.age_band || "intermediate";
+    const ageBand = profileRow?.effective_band || "intermediate";
     const existingVisibility = (userRow?.profile_visibility || {}) as Record<string, unknown>;
     const hasVisibility = Object.keys(existingVisibility).length > 0;
 

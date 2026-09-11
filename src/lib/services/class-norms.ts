@@ -12,6 +12,7 @@
 import { createSupabaseServiceClient } from "@/lib/supabase/server";
 import { conditionsFromMetadata } from "@/lib/utils/conditions";
 import { trackEvent } from "@/lib/utils/track-event";
+import { fetchAllByIds, fetchAllRows } from "@/lib/utils/paginate";
 import {
   computeClassNormStats,
   normLineFor,
@@ -35,27 +36,38 @@ export interface ClassNormRunResult {
 export async function computeAndStoreClassNorms(computedOn: string): Promise<ClassNormRunResult> {
   const supabase = await createSupabaseServiceClient();
 
-  const { data: rosters } = await supabase.from("rosters").select("id").is("deleted_at", null);
-  const rosterIds = (rosters || []).map((r) => r.id as string);
+  // Paginated throughout: every class in the deployment, every enrolled player.
+  const rosters = await fetchAllRows<{ id: string }>((from, to) =>
+    supabase.from("rosters").select("id").is("deleted_at", null).order("id", { ascending: true }).range(from, to)
+  );
+  const rosterIds = rosters.map((r) => r.id);
   if (rosterIds.length === 0) return { rosters: 0, written: 0, skipped_small: 0 };
 
-  const { data: entryRows } = await supabase
-    .from("roster_entries")
-    .select("roster_id, student_id")
-    .in("roster_id", rosterIds);
-  const entries = (entryRows || []) as RosterEntry[];
+  const entries = await fetchAllByIds<RosterEntry>(rosterIds, (ids, from, to) =>
+    supabase
+      .from("roster_entries")
+      .select("roster_id, student_id")
+      .in("roster_id", ids)
+      .order("roster_id", { ascending: true })
+      .range(from, to)
+  );
   const rostersWithPlayers = new Set(entries.map((e) => e.roster_id)).size;
 
   const studentIds = [...new Set(entries.map((e) => e.student_id))];
+  const users = await fetchAllByIds<{ id: string; profile_visibility: unknown }>(
+    studentIds,
+    (ids, from, to) =>
+      supabase
+        .from("users")
+        .select("id, profile_visibility")
+        .in("id", ids)
+        .order("id", { ascending: true })
+        .range(from, to),
+    USER_CHUNK
+  );
   const visibilityByUser = new Map<string, Record<string, string> | undefined>();
-  for (let i = 0; i < studentIds.length; i += USER_CHUNK) {
-    const { data: users } = await supabase
-      .from("users")
-      .select("id, profile_visibility")
-      .in("id", studentIds.slice(i, i + USER_CHUNK));
-    for (const u of users || []) {
-      visibilityByUser.set(u.id as string, (u.profile_visibility ?? undefined) as Record<string, string> | undefined);
-    }
+  for (const u of users) {
+    visibilityByUser.set(u.id, (u.profile_visibility ?? undefined) as Record<string, string> | undefined);
   }
 
   const rows = computeClassNormStats(entries, visibilityByUser).map((s) => ({ ...s, computed_on: computedOn }));

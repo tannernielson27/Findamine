@@ -30,7 +30,7 @@ const choose = (body: unknown, token?: string) => post(schemeChoice, "/api/v1/re
 function seed(metadata: Record<string, unknown>, selections: Record<string, unknown>[] = []): SupabaseDouble {
   return installDouble(
     {
-      users: [{ id: "u1", auth_id: "auth-1", role: "student", deleted_at: null, metadata }],
+      users: [{ id: "u1", auth_id: "auth-1", role: "teen", deleted_at: null, metadata }],
       scheme_selections: selections,
       study_enrollments: [{ id: "e1", study_id: "s1", user_id: "u1", withdrawn_at: null }],
       minion_links: [],

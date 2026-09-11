@@ -18,7 +18,6 @@ const D_DEFAULT = "dim-b-default";
 function seed(n: number, opts: { consent?: boolean; activeDims?: boolean } = {}): SupabaseDouble {
   const users = Array.from({ length: n }, (_, i) => ({
     id: `u${i + 1}`,
-    age_band: "intermediate",
     school_id: null,
     metadata: { existing_key: "keep-me" },
     profile_visibility: {},
@@ -46,6 +45,9 @@ function seed(n: number, opts: { consent?: boolean; activeDims?: boolean } = {})
       { study_id: STUDY, dimension_id: D_DEFAULT, sort_order: 1, active_levels: ["public", "private"] },
     ],
     users,
+    // Stratification reads the band from user_profiles.effective_band; `users`
+    // has no age_band column on the real schema.
+    user_profiles: users.map((u) => ({ user_id: u.id, effective_band: "adult" })),
     consent_records,
     survey_schedules: [],
   });
