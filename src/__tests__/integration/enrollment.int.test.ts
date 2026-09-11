@@ -140,4 +140,18 @@ describe("enrollParticipant against the Supabase double", () => {
     expect((failures[0].payload as Record<string, unknown>).stage).toBe("randomize");
     expect(db.table("study_enrollments")).toHaveLength(0);
   });
+
+  it("fails loudly instead of dropping a linked dimension that is inactive", async () => {
+    db = seed(2);
+    db.replace(
+      "treatment_dimensions",
+      db.table("treatment_dimensions").map((d) => (d.id === D_DEFAULT ? { ...d, is_active: false } : d))
+    );
+    const r = await enrollParticipant("u1");
+    expect(r.enrolled).toBe(false);
+    expect(r.error).toContain(D_DEFAULT);
+    const failures = db.where("behavioral_events", (e) => e.event_name === "study_enrollment_failed");
+    expect((failures[0].payload as Record<string, unknown>).stage).toBe("randomize");
+    expect(db.table("dimension_assignments")).toHaveLength(0);
+  });
 });

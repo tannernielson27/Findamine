@@ -50,6 +50,43 @@ export function conditionsFromMetadata(
   return Object.fromEntries([...legacy, ...generic]);
 }
 
+/**
+ * Server-owned metadata key stamped by the withdraw route. Assignments stay in
+ * metadata (and dimension_assignments) as a record, but a withdrawn
+ * participant must never be manipulated again.
+ */
+export const WITHDRAWN_META_KEY = "research_withdrawn_at";
+
+export function isWithdrawn(meta: Record<string, unknown> | null | undefined): boolean {
+  return isLevel(meta?.[WITHDRAWN_META_KEY]);
+}
+
+/**
+ * Read one storyline switch from `users.metadata` (`dim_<dimension>`), falling
+ * back when the dimension is unlinked, unassigned, holds an unknown level, or
+ * the participant has withdrawn. Every cohort-2 storyline (C2, C3, D2, D3)
+ * reads its condition through this so the fallback always means "today's
+ * behavior". Pure.
+ */
+export function levelFromMetadata<L extends string>(
+  meta: Record<string, unknown> | null | undefined,
+  dimension: string,
+  levels: readonly L[],
+  fallback: L
+): L {
+  if (isWithdrawn(meta)) return fallback;
+  const raw = meta?.[`${DIMENSION_META_PREFIX}${dimension}`];
+  return typeof raw === "string" && (levels as readonly string[]).includes(raw) ? (raw as L) : fallback;
+}
+
+/** True when the participant holds a level on `dimension` and has not withdrawn. Pure. */
+export function hasDimension(
+  meta: Record<string, unknown> | null | undefined,
+  dimension: string
+): boolean {
+  return !isWithdrawn(meta) && isLevel(meta?.[`${DIMENSION_META_PREFIX}${dimension}`]);
+}
+
 function isLevel(value: unknown): value is string {
   return typeof value === "string" && value.length > 0;
 }

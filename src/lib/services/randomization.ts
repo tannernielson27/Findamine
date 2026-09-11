@@ -153,6 +153,15 @@ export async function assignParticipant(
   if (!dimensionsRaw || dimensionsRaw.length === 0) {
     throw new Error("No active dimensions found");
   }
+  // A linked dimension that is inactive (or missing) used to be dropped
+  // silently, so the study ran with fewer factors than designed. Fail loudly
+  // instead; enrollment logs it as study_enrollment_failed. To stop crossing a
+  // factor, unlink it from the study rather than deactivating it.
+  const activeIds = new Set(dimensionsRaw.map((d) => d.id as string));
+  const inactive = [...new Set(config.dimensionIds)].filter((id) => !activeIds.has(id));
+  if (inactive.length > 0) {
+    throw new Error(`Linked dimensions are inactive or missing: ${inactive.join(", ")}`);
+  }
   const dims = [...dimensionsRaw].sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
 
   // Per-study level subsets (migration 052). Validated by resolveLevels.

@@ -1,5 +1,39 @@
 import { describe, it, expect } from "vitest";
-import { conditionsFromMetadata } from "@/lib/utils/conditions";
+import { conditionsFromMetadata, levelFromMetadata, hasDimension } from "@/lib/utils/conditions";
+
+describe("levelFromMetadata", () => {
+  const LEVELS = ["none", "weekly"] as const;
+
+  it("returns the assigned level when it is a known level", () => {
+    expect(levelFromMetadata({ dim_privacy_checkin: "weekly" }, "privacy_checkin", LEVELS, "none")).toBe("weekly");
+  });
+
+  it("falls back when unlinked, unknown, or non-string", () => {
+    expect(levelFromMetadata({}, "privacy_checkin", LEVELS, "none")).toBe("none");
+    expect(levelFromMetadata(null, "privacy_checkin", LEVELS, "none")).toBe("none");
+    expect(levelFromMetadata({ dim_privacy_checkin: "daily" }, "privacy_checkin", LEVELS, "none")).toBe("none");
+    expect(levelFromMetadata({ dim_privacy_checkin: 7 }, "privacy_checkin", LEVELS, "none")).toBe("none");
+  });
+
+  it("falls back for a withdrawn participant, and hasDimension turns off", () => {
+    const meta = { dim_privacy_checkin: "weekly", research_withdrawn_at: "2026-09-11T00:00:00Z" };
+    expect(levelFromMetadata(meta, "privacy_checkin", LEVELS, "none")).toBe("none");
+    expect(hasDimension(meta, "privacy_checkin")).toBe(false);
+  });
+
+  it("ignores the legacy alias keys", () => {
+    expect(levelFromMetadata({ privacy_checkin: "weekly" }, "privacy_checkin", LEVELS, "none")).toBe("none");
+  });
+});
+
+describe("hasDimension", () => {
+  it("is true only for a non-empty assigned level", () => {
+    expect(hasDimension({ dim_scheme_selection: "chosen" }, "scheme_selection")).toBe(true);
+    expect(hasDimension({ dim_scheme_selection: "" }, "scheme_selection")).toBe(false);
+    expect(hasDimension({}, "scheme_selection")).toBe(false);
+    expect(hasDimension(undefined, "scheme_selection")).toBe(false);
+  });
+});
 
 describe("conditionsFromMetadata", () => {
   it("maps the three legacy keys to dimension names", () => {
