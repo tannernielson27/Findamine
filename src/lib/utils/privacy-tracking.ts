@@ -105,6 +105,8 @@ export interface PrivacyEventPayload {
   duration_ms?: number;
   click_count?: number;
   session_id?: string;
+  /** S5 norm line shown on this page view (migration 062); validated server-side. */
+  norm_exposure_id?: string | null;
   metadata?: Record<string, unknown>;
 }
 

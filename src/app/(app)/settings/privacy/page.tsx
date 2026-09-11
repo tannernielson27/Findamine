@@ -12,11 +12,19 @@ import {
   logPrivacyEvent, diffVisibility, classifyChange, countOptionsShown,
 } from "@/lib/utils/privacy-tracking";
 import { computePrivacyIndex } from "@/lib/utils/privacy-index";
+import SchemePreview, { type SchemePreviewSubmission } from "@/components/privacy/scheme-preview";
+import SchemeSwitch from "@/components/privacy/scheme-switch";
+import { schemeSelectionState, type Scheme, type SchemeSelectionState } from "@/lib/utils/scheme-selection";
+import {
+  fetchBaselineGate, fetchNormLine, fetchOverridePeople, postSchemeChoice,
+  type NormLineData, type OverridePerson,
+} from "./privacy-page-data";
 
 const VISIBILITY_LEVELS: VisibilityLevel[] = ["nobody", "team", "class", "everyone"];
 
-/** Someone a per-person rule can apply to (migration 057). */
-type OverridePerson = { id: string; name: string; kind: "friend" | "minion" };
+/** How the participant arrived: an S4 check-in or an S6 score notice (`?from=`). */
+const ENTRY_SOURCES = ["checkin", "notice"] as const;
+
 type OverrideChoice = "inherit" | "see" | "hidden";
 const OVERRIDE_CHOICES: { value: OverrideChoice; label: string }[] = [
   { value: "inherit", label: "General" },
@@ -28,12 +36,6 @@ const OVERRIDE_CHOICES: { value: OverrideChoice; label: string }[] = [
 // participant has seen the controls but before the first save.
 const GATE_TIMEPOINT = "T1";
 const GATE_POLL_MS = 20_000;
-
-interface PendingTriggerDelivery {
-  delivery_id: string;
-  survey_id: string;
-  timepoint: string | null;
-}
 
 export default function PrivacySettingsPage() {
   const [visibility, setVisibility] = useState<Record<string, VisibilityLevel>>({});
@@ -55,6 +57,15 @@ export default function PrivacySettingsPage() {
   // for THIS user; non-participants never get one, so the gate never blocks them.
   const [gateDeliveryId, setGateDeliveryId] = useState<string | null>(null);
 
+  // ── Scheme preview / switch (S2, migration 060) and norm line (S5, 062) ──
+  // All inert unless the participant holds a level on those dimensions.
+  const [selection, setSelection] = useState<SchemeSelectionState | null>(null);
+  const [previewOpen, setPreviewOpen] = useState(false);
+  const [schemeBusy, setSchemeBusy] = useState(false);
+  const [schemeError, setSchemeError] = useState<string | null>(null);
+  const [normLine, setNormLine] = useState<NormLineData | null>(null);
+  const [userId, setUserId] = useState("");
+
   // Per-person overrides (migration 057) — the 2014 "High" tier layer. Only
   // rendered under the `complex` scheme; `people` are the accepted friends and
   // crew members a rule can apply to.
@@ -74,6 +85,46 @@ export default function PrivacySettingsPage() {
   const treatmentRef = useRef<string>("moderate");
   const frictionRef = useRef<string | null>(null);
   const sessionIdRef = useRef<string>("");
+  const userIdRef = useRef<string>("");
+  const normExposureIdRef = useRef<string | null>(null);
+  const entrySourceRef = useRef<string | null>(null);
+
+  /**
+   * Log that a control scheme is on screen (the engagement denominator, with
+   * the objective option count, B4) and, unless this is a switch, issue the
+   * T1 baseline (B2). Deferred until after the S2 preview when there is one.
+   */
+  const announceView = useCallback(
+    async (scheme: string, reason: "load" | "after_preview" | "after_switch") => {
+      let peopleListed = 0;
+      if (scheme === "complex" && userIdRef.current) {
+        const list = await fetchOverridePeople(userIdRef.current);
+        setPeople(list);
+        peopleListed = list.length;
+      }
+      logPrivacyEvent({
+        event_type: "privacy_view",
+        page: "settings_privacy",
+        session_id: sessionIdRef.current,
+        norm_exposure_id: normExposureIdRef.current,
+        metadata: {
+          treatment: scheme,
+          friction: frictionRef.current,
+          index: computePrivacyIndex(originalRef.current),
+          scheme,
+          options_shown: countOptionsShown(scheme, peopleListed), // objective option count (B4 + C1)
+          people_listed: peopleListed,
+          override_count: countOverrides(overridesRef.current),
+          view_reason: reason,
+          entry_source: entrySourceRef.current,
+        },
+      });
+      if (reason === "after_switch") return;
+      const gate = await fetchBaselineGate(GATE_TIMEPOINT);
+      if (gate) setGateDeliveryId(gate);
+    },
+    []
+  );
 
   // Keep a ref mirror of visibility so the unmount handler sees the latest value.
   useEffect(() => {
@@ -88,49 +139,8 @@ export default function PrivacySettingsPage() {
           ? crypto.randomUUID()
           : String(Date.now());
     }
-    /** Fire the privacy_view survey trigger; gate on a pending T1 delivery. */
-    async function triggerBaselineSurvey() {
-      try {
-        const res = await fetch("/api/v1/surveys/trigger", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ event: "privacy_view" }),
-        });
-        if (!res.ok) return;
-        const data = (await res.json()) as { pending?: PendingTriggerDelivery[] };
-        const t1 = (data.pending || []).find((p) => p.timepoint === GATE_TIMEPOINT);
-        if (t1) setGateDeliveryId(t1.delivery_id);
-      } catch {
-        // Telemetry/gating must never break the page; no delivery → no gate.
-      }
-    }
-
-    // Who a per-person rule can apply to: accepted friends + my crew. Best-effort.
-    async function fetchOverridePeople(myId: string): Promise<OverridePerson[]> {
-      const found = new Map<string, OverridePerson>();
-      try {
-        const [fr, rf] = await Promise.all([
-          fetch("/api/v1/social/friends").then((r) => (r.ok ? r.json() : { friends: [] })),
-          fetch("/api/v1/social/referrals").then((r) => (r.ok ? r.json() : { minions: [] })),
-        ]);
-        for (const row of fr.friends || []) {
-          if (row.status && row.status !== "accepted") continue;
-          const other = row.requester?.id === myId ? row.addressee : row.requester;
-          if (other?.id && other.id !== myId) {
-            found.set(other.id, { id: other.id, name: other.display_name || "A player", kind: "friend" });
-          }
-        }
-        for (const m of rf.minions || []) {
-          const u = m.user;
-          if (u?.id && !found.has(u.id)) {
-            found.set(u.id, { id: u.id, name: u.display_name || "A crew member", kind: "minion" });
-          }
-        }
-      } catch {
-        // the list is a convenience; the settings page must still work without it
-      }
-      return [...found.values()];
-    }
+    const from = new URLSearchParams(window.location.search).get("from");
+    entrySourceRef.current = from && (ENTRY_SOURCES as readonly string[]).includes(from) ? from : null;
 
     fetch("/api/v1/auth/me")
       .then((r) => r.json())
@@ -161,39 +171,77 @@ export default function PrivacySettingsPage() {
           currentRef.current = loaded;
           openedAtRef.current = Date.now();
 
-          // Per-person overrides and the people they can apply to (complex only).
+          // Per-person overrides (the people list loads with the view, complex only).
           const loadedOverrides = (data.user.profile_visibility_overrides || {}) as VisibilityOverrides;
           setOverrides(loadedOverrides);
           overridesRef.current = loadedOverrides;
-          let peopleListed = 0;
-          if (t === "complex" && data.user.id) {
-            const list = await fetchOverridePeople(data.user.id);
-            setPeople(list);
-            peopleListed = list.length;
+          userIdRef.current = data.user.id ?? "";
+          setUserId(data.user.id ?? "");
+
+          // S5 norm line, fetched before the view is logged so the view and
+          // any save carry the exposure id.
+          const norm = await fetchNormLine();
+          setNormLine(norm);
+          normExposureIdRef.current = norm?.exposureId ?? null;
+
+          // S2: the controls, the view event and the T1 trigger all wait
+          // until the scheme preview is submitted.
+          const sel = schemeSelectionState(data.user.metadata);
+          setSelection(sel);
+          if (sel.needsPreview) {
+            setPreviewOpen(true);
+            return;
           }
-
-          // Log that the privacy surface was viewed (denominator for engagement).
-          logPrivacyEvent({
-            event_type: "privacy_view",
-            page: "settings_privacy",
-            session_id: sessionIdRef.current,
-            metadata: {
-              treatment: t,
-              friction: f === "low" || f === "high" ? f : null,
-              index: computePrivacyIndex(loaded),
-              scheme: t,
-              options_shown: countOptionsShown(t, peopleListed), // objective option count (B4 + C1)
-              people_listed: peopleListed,
-              override_count: countOverrides(loadedOverrides),
-            },
-          });
-
-          // Seeing the controls is the event that issues the T1 baseline (B2).
-          void triggerBaselineSurvey();
+          await announceView(t, "load");
         }
       })
       .catch(() => {});
-  }, [ageBand]);
+  }, [ageBand, announceView]);
+
+  /** Put a scheme returned by the scheme-choice route into force on the page. */
+  function applyScheme(scheme: Scheme, state: SchemeSelectionState) {
+    setTreatment(scheme);
+    treatmentRef.current = scheme;
+    setSelection(state);
+  }
+
+  async function completePreview(submission: SchemePreviewSubmission) {
+    setSchemeBusy(true);
+    setSchemeError(null);
+    const res = await postSchemeChoice({ source: "preview", ...submission });
+    setSchemeBusy(false);
+    if (!res.ok) {
+      setSchemeError(res.error);
+      return;
+    }
+    applyScheme(res.scheme, res.state);
+    setPreviewOpen(false);
+    openedAtRef.current = Date.now(); // save timing starts with the controls, not the preview
+    await announceView(res.scheme, "after_preview");
+  }
+
+  async function confirmSwitch(scheme: Scheme) {
+    setSchemeBusy(true);
+    setSchemeError(null);
+    const res = await postSchemeChoice({ source: "switch", scheme });
+    setSchemeBusy(false);
+    if (!res.ok) {
+      setSchemeError(res.error);
+      return;
+    }
+    applyScheme(res.scheme, res.state);
+    await announceView(res.scheme, "after_switch");
+  }
+
+  /** A request to switch schemes is an S2 outcome even when cancelled. */
+  function logSchemeSwitchStep(step: "opened" | "cancelled") {
+    logPrivacyEvent({
+      event_type: "privacy_field_touch",
+      page: "settings_privacy",
+      session_id: sessionIdRef.current,
+      metadata: { treatment: treatmentRef.current, scope: `scheme_switch:${step}`, fields: [] },
+    });
+  }
 
   /** Emit a survey-gate step on the privacy_field_touch channel (once each). */
   function logGateStep(step: "blocked" | "cleared") {
@@ -273,6 +321,7 @@ export default function PrivacySettingsPage() {
         duration_ms: Date.now() - openedAtRef.current,
         click_count: clickCountRef.current,
         session_id: sessionIdRef.current,
+        norm_exposure_id: normExposureIdRef.current,
         metadata: {
           treatment: treatmentRef.current,
           friction: frictionRef.current,
@@ -356,6 +405,7 @@ export default function PrivacySettingsPage() {
           duration_ms: Date.now() - openedAtRef.current,
           click_count: clickCountRef.current,
           session_id: sessionIdRef.current,
+          norm_exposure_id: normExposureIdRef.current,
         },
       }),
     });
@@ -443,6 +493,7 @@ export default function PrivacySettingsPage() {
   // so the first logged choice is a full, deliberate configuration.
   const unsetCount = PROFILE_FIELDS.filter((f) => !visibility[f.key]).length;
   const surveyGated = gateDeliveryId !== null;
+  const showControls = controlsRevealed && !previewOpen;
 
   return (
     <main className="mx-auto max-w-2xl px-4 py-4">
@@ -450,6 +501,13 @@ export default function PrivacySettingsPage() {
       <p className="text-xs text-gray-500 mb-4">
         Choose who can see different parts of your profile. You can change these anytime.
       </p>
+
+      {/* S5 descriptive norm line (migration 062), descriptive arm only. */}
+      {normLine && (
+        <p className="rounded-lg border border-gray-200 bg-white px-3 py-2 text-xs text-gray-700 mb-4">
+          {normLine.message}
+        </p>
+      )}
 
       {/* Educational intro */}
       <div className="rounded-lg bg-sky-50 border border-sky-200 p-3 mb-4">
@@ -484,6 +542,21 @@ export default function PrivacySettingsPage() {
         </div>
       )}
 
+      {/* S2 scheme preview (migration 060): replaces the controls until
+          submitted, but never before the high-friction gate — a participant
+          crossed on both factors must still take the extra step first, or the
+          friction manipulation would be defeated for that arm. */}
+      {controlsRevealed && previewOpen && selection && (
+        <SchemePreview
+          seed={userId}
+          canChoose={selection.canChoose}
+          submitting={schemeBusy}
+          error={schemeError}
+          getSessionId={() => sessionIdRef.current}
+          onSubmit={(s) => void completePreview(s)}
+        />
+      )}
+
       {/* HIGH-friction gate: controls stay collapsed behind one more step. */}
       {!controlsRevealed && (
         <div className="rounded-lg border border-gray-200 bg-white p-4 mb-6">
@@ -504,7 +577,7 @@ export default function PrivacySettingsPage() {
       )}
 
       {/* SIMPLE treatment: one master toggle */}
-      {controlsRevealed && treatment === "simple" && (
+      {showControls && treatment === "simple" && (
         <div className="space-y-3 mb-6">
           <p className="text-sm font-medium text-gray-700">Who can see your profile?</p>
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
@@ -530,7 +603,7 @@ export default function PrivacySettingsPage() {
       )}
 
       {/* MODERATE treatment: 3 categories × 3 levels */}
-      {controlsRevealed && treatment === "moderate" && (
+      {showControls && treatment === "moderate" && (
         <div className="space-y-4 mb-6">
           {CATEGORIES.map((cat) => {
             // Highlight a level only when every field in the category shares it;
@@ -572,7 +645,7 @@ export default function PrivacySettingsPage() {
       )}
 
       {/* COMPLEX treatment: per-field × 4 levels */}
-      {controlsRevealed && treatment === "complex" && (
+      {showControls && treatment === "complex" && (
         <div className="space-y-2 mb-6">
           {PROFILE_FIELDS.map((field) => (
             <div key={field.key} className="rounded-lg border border-gray-200 p-3">
@@ -676,7 +749,7 @@ export default function PrivacySettingsPage() {
 
       {/* Save button — a NEUTRAL-default participant starts with nothing selected
           and must make a complete first choice before saving (Workstream A / A10). */}
-      {controlsRevealed && (
+      {showControls && (
         <>
           {surveyGated && (
             <p className="text-xs text-violet-800 mb-2">
@@ -702,6 +775,16 @@ export default function PrivacySettingsPage() {
             </button>
             {saved && <span className="text-xs text-green-600">Saved!</span>}
           </div>
+          {selection?.canSwitch && (
+            <SchemeSwitch
+              current={selection.currentScheme}
+              busy={schemeBusy}
+              error={schemeError}
+              onOpen={() => logSchemeSwitchStep("opened")}
+              onCancel={() => logSchemeSwitchStep("cancelled")}
+              onConfirm={(s) => void confirmSwitch(s)}
+            />
+          )}
         </>
       )}
 

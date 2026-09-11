@@ -2,6 +2,7 @@ import { NextRequest } from "next/server";
 import { createSupabaseServiceClient } from "@/lib/supabase/server";
 import { getAuthUser, errorResponse, ApiError } from "@/lib/utils/api-auth";
 import { conditionsFromMetadata } from "@/lib/utils/conditions";
+import { ownsNormExposure } from "@/lib/services/class-norms";
 
 // Log privacy-related events (Studies 1-3)
 export async function POST(request: NextRequest) {
@@ -32,6 +33,10 @@ export async function POST(request: NextRequest) {
       .maybeSingle();
     const meta = (userRow?.metadata || {}) as Record<string, unknown>;
     const conditions = conditionsFromMetadata(meta);
+    // Only the caller's own norm exposure (S5, migration 062) may be stamped.
+    const normExposureId = (await ownsNormExposure(user.id, body.norm_exposure_id))
+      ? (body.norm_exposure_id as string)
+      : null;
 
     const { data, error } = await supabase
       .from("privacy_events")
@@ -47,7 +52,7 @@ export async function POST(request: NextRequest) {
         duration_ms: body.duration_ms || null,
         click_count: body.click_count || null,
         session_id: body.session_id || null,
-        norm_exposure_id: body.norm_exposure_id || null,
+        norm_exposure_id: normExposureId,
         metadata: body.metadata || {},
       })
       .select()

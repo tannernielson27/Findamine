@@ -9,7 +9,7 @@ import { createSupabaseServiceClient } from "@/lib/supabase/server";
 import { diffVisibility, classifyChange } from "@/lib/utils/privacy-tracking";
 import { computePrivacyIndex } from "@/lib/utils/privacy-index";
 import { recordPrivacyIndexSnapshot } from "@/lib/services/privacy-snapshots";
-import { conditionsFromMetadata, DIMENSION_META_PREFIX } from "@/lib/utils/conditions";
+import { conditionsFromMetadata, DIMENSION_META_PREFIX, WITHDRAWN_META_KEY } from "@/lib/utils/conditions";
 import {
   sanitizeOverrides,
   overridesEqual,
@@ -17,11 +17,15 @@ import {
   PROFILE_FIELD_KEYS,
   type VisibilityOverrides,
 } from "@/lib/utils/privacy";
+import { SCHEME_META_KEYS } from "@/lib/utils/scheme-selection";
+import { ownsNormExposure } from "@/lib/services/class-norms";
 
 interface PrivacyMeta {
   duration_ms?: number;
   click_count?: number;
   session_id?: string;
+  /** The S5 norm line shown on this page view (migration 062); validated as the caller's. */
+  norm_exposure_id?: string;
 }
 
 export async function PUT(request: NextRequest) {
@@ -103,6 +107,8 @@ export async function PUT(request: NextRequest) {
         "privacy_default",
         "privacy_friction",
         "privacy_first_choice_at",
+        ...SCHEME_META_KEYS, // S2 flow state, written only by the scheme-choice route
+        WITHDRAWN_META_KEY, // written only by the withdraw route
       ];
       // `dim_<dimension>` keys are the generic condition convention written by
       // enrollment (read by conditionsFromMetadata) — equally server-owned.
@@ -151,6 +157,9 @@ export async function PUT(request: NextRequest) {
       // metadata read BEFORE this update so a client payload can never influence it.
       const conditions = conditionsFromMetadata(existingMeta);
       const meta = (body.privacy_meta || {}) as PrivacyMeta;
+      const normExposureId = (await ownsNormExposure(user.id, meta.norm_exposure_id))
+        ? (meta.norm_exposure_id as string)
+        : null;
 
       await supabase.from("privacy_events").insert({
         user_id: user.id,
@@ -164,6 +173,7 @@ export async function PUT(request: NextRequest) {
         treatment,
         privacy_default: privacyDefault,
         conditions,
+        norm_exposure_id: normExposureId,
         metadata: {
           deltas,
           direction: classifyChange(deltas),
