@@ -235,15 +235,11 @@ describe("H9 simulated-cohort dry run", () => {
     rosterIds = (rosters ?? []).map((r) => r.id as string);
     expect(rosterIds).toHaveLength(SECTIONS);
 
-    // users.role is COPPA-era: child / teen / parent / teacher / hunt_creator /
-    // admin / researcher. There is NO adult-participant role, and registration
-    // only ever assigns child or teen — so an adult undergraduate enrolls as
-    // "teen" and their adulthood is carried by user_profiles.age_band instead.
-    // Worth a decision before the pilot; see the dry-run notes in the build plan.
+    // Adult undergraduates register with the 'adult' player role (migration 065).
     const userRows = Array.from({ length: COHORT_SIZE }, (_, i) => ({
       email: `p${String(i + 1).padStart(3, "0")}@${DRY_RUN_EMAIL_DOMAIN}`,
       display_name: `Dry Run Participant ${i + 1}`,
-      role: "teen",
+      role: "adult",
       metadata: { dry_run: DRY_RUN_TAG },
       created_at: daysBefore(STUDY_DAYS + 1),
     }));
@@ -308,17 +304,29 @@ describe("H9 simulated-cohort dry run", () => {
       expect(p.metadata.dry_run).toBe(DRY_RUN_TAG);
     }
 
+    // Allocation is stratified by class section, so the ≤1 guarantee holds
+    // within each section; across sections the spread is at most one per section.
     const cells = new Map<string, number>();
-    for (const p of participants) {
+    const sectionCells = new Map<number, Map<string, number>>();
+    participants.forEach((p, i) => {
       expect(["simple", "moderate", "complex"]).toContain(p.complexity);
       expect(["public", "private"]).toContain(p.privacyDefault);
       const key = `${p.complexity}|${p.privacyDefault}`;
       cells.set(key, (cells.get(key) ?? 0) + 1);
-    }
+      const section = i % SECTIONS; // matches the roster_entries insert above
+      if (!sectionCells.has(section)) sectionCells.set(section, new Map());
+      const sc = sectionCells.get(section)!;
+      sc.set(key, (sc.get(key) ?? 0) + 1);
+    });
     console.log("  cell sizes:", Object.fromEntries([...cells].sort()));
     expect(cells.size).toBe(6);
     const counts = [...cells.values()];
-    expect(Math.max(...counts) - Math.min(...counts)).toBeLessThanOrEqual(1);
+    expect(Math.max(...counts) - Math.min(...counts)).toBeLessThanOrEqual(SECTIONS);
+    for (const sc of sectionCells.values()) {
+      const within = [...sc.values()];
+      expect(sc.size).toBe(6);
+      expect(Math.max(...within) - Math.min(...within)).toBeLessThanOrEqual(1);
+    }
 
     // Backdate enrollment so the simulated timeline starts 42 days ago.
     await db

@@ -85,17 +85,20 @@ export function countOptionsShown(scheme: string, peopleListed = 0): number {
     case "moderate":
       return CATEGORIES.length * LEVEL_COUNT;
     case "complex":
-      // Per-field controls plus the per-person layer (migration 057): each
-      // person listed adds a 3-way choice per person, mirroring the 2014
-      // "20 + 3 per frenemy" High condition.
+      // Per-field controls plus the per-person layer (migration 057). Each
+      // person listed gets every profile field with a 3-way choice, so the
+      // layer grows 8× faster per person than the 2014 "20 + 3 per frenemy".
       return PROFILE_FIELDS.length * LEVEL_COUNT + OVERRIDE_OPTIONS_PER_PERSON * Math.max(0, peopleListed);
     default:
       return 0;
   }
 }
 
-/** Options a per-person override adds per person listed (inherit / can see / hidden). */
-export const OVERRIDE_OPTIONS_PER_PERSON = 3;
+/** Choices per field in a per-person rule (inherit / can see / hidden). */
+export const OVERRIDE_CHOICES_PER_FIELD = 3;
+
+/** Options the per-person layer adds per person listed: every field × its choices. */
+export const OVERRIDE_OPTIONS_PER_PERSON = PROFILE_FIELDS.length * OVERRIDE_CHOICES_PER_FIELD;
 
 export interface PrivacyEventPayload {
   event_type: "privacy_change" | "privacy_abandon" | "privacy_view" | "privacy_field_touch";

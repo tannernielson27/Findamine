@@ -59,6 +59,12 @@ describe("buildConditionDimensions", () => {
     expect(out.every((d) => d.assigned_level === null)).toBe(true);
   });
 
+  it("lists only the study's active levels when the link restricts them", () => {
+    const rows: LinkedDimensionRow[] = [{ ...linked[1], active_levels: ["public", "private"] }];
+    const out = buildConditionDimensions(rows, [{ dimension_id: "d-default", level: "public" }]);
+    expect(out[0].levels).toEqual(["private", "public"]); // dimension order, neutral dropped
+  });
+
   it("skips rows with a missing joined dimension and does not mutate input order", () => {
     const rows: LinkedDimensionRow[] = [...linked, { dimension_id: "d-gone", treatment_dimensions: null }];
     const out = buildConditionDimensions(rows, []);

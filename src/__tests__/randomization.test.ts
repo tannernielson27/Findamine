@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import {
   cartesianProduct,
   stratumKeyFor,
+  classByStudent,
   resolveLevels,
   pickLeastFilledCell,
   cellKey,
@@ -57,6 +58,25 @@ describe("stratumKeyFor", () => {
 
   it("combines multiple strata deterministically", () => {
     expect(stratumKeyFor(["age_band", "school_id"], "adult", "s1")).toBe("band:adult|school:s1");
+  });
+
+  it("stratifies by class section, defaulting to 'none'", () => {
+    expect(stratumKeyFor(["class_id"], "adult", "s1", "r1")).toBe("class:r1");
+    expect(stratumKeyFor(["class_id"], "adult", "s1", null)).toBe("class:none");
+    expect(stratumKeyFor(["class_id"], "adult", "s1")).toBe("class:none");
+  });
+});
+
+describe("classByStudent", () => {
+  it("uses the first-joined roster per student", () => {
+    const out = classByStudent([
+      { student_id: "u1", roster_id: "r2", added_at: "2026-09-02T00:00:00Z" },
+      { student_id: "u1", roster_id: "r1", added_at: "2026-09-01T00:00:00Z" },
+      { student_id: "u2", roster_id: "r3", added_at: null },
+    ]);
+    expect(out.get("u1")).toBe("r1");
+    expect(out.get("u2")).toBe("r3");
+    expect(out.has("u3")).toBe(false);
   });
 });
 

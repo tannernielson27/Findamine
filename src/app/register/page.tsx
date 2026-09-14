@@ -26,6 +26,8 @@ function RegisterForm() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const referralCode = searchParams.get("ref")?.trim().toUpperCase() || "";
+  // Self-registered players confirm their age: teens 13+, adults 18+.
+  const needsDob = role === "teen" || role === "adult";
 
   async function handleRegister(e: React.FormEvent) {
     e.preventDefault();
@@ -40,7 +42,7 @@ function RegisterForm() {
         password,
         display_name: displayName,
         role,
-        date_of_birth: role === "teen" ? dateOfBirth : undefined,
+        date_of_birth: needsDob ? dateOfBirth : undefined,
         referral_code: referralCode || undefined,
       }),
     });
@@ -171,10 +173,11 @@ function RegisterForm() {
                 <option value="parent">Parent</option>
                 <option value="teacher">Teacher</option>
                 <option value="teen">Teen (13+)</option>
+                <option value="adult">Adult player (18+)</option>
               </select>
             </div>
 
-            {role === "teen" && (
+            {needsDob && (
               <div>
                 <label htmlFor="dob" className="block text-sm font-medium text-gray-700 mb-1">
                   Date of birth
@@ -189,7 +192,9 @@ function RegisterForm() {
                   className="block w-full rounded-xl border border-gray-200 bg-gray-50 px-4 py-2.5 text-sm focus:bg-white focus:border-brand focus:outline-none focus:ring-2 focus:ring-brand/20 transition-all"
                 />
                 <p className="mt-1.5 text-xs text-gray-500">
-                  You must be 13 or older to create your own account.
+                  {role === "adult"
+                    ? "Adult accounts are for players 18 or older."
+                    : "You must be 13 or older to create your own account."}
                 </p>
               </div>
             )}
@@ -201,7 +206,7 @@ function RegisterForm() {
 
             <button
               type="submit"
-              disabled={loading || (role === "teen" && !dateOfBirth)}
+              disabled={loading || (needsDob && !dateOfBirth)}
               className="w-full rounded-xl bg-brand px-4 py-2.5 text-sm font-semibold text-white shadow-sm hover:bg-brand-dark hover:shadow-md disabled:opacity-50 transition-all"
             >
               {loading ? "Creating account..." : "Start Exploring"}

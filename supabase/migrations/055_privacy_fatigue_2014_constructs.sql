@@ -103,7 +103,7 @@ BEGIN
     (v_t1, 'eu_2', 'I believe I can achieve the privacy outcome I want by using these settings.', 'likert_7', '{"min":1,"max":7}', false, 'expected_utility', 24),
     (v_t1, 'eu_3', 'I doubt these privacy settings will actually get me the level of sharing I am looking for.', 'likert_7', '{"min":1,"max":7}', true, 'expected_utility', 25),
 
-    -- self_efficacy (adapted from Keith, Babb, Furner & Abdullat, 2011, ICIS)
+    -- self_efficacy (adapted from Keith, Babb, Furner & Abdullat, 2011, HICSS)
     (v_t1, 'se_1', 'I am confident I can figure out how to use the settings in a new mobile app without help.', 'likert_7', '{"min":1,"max":7}', false, 'self_efficacy', 26),
     (v_t1, 'se_2', 'I could complete a task in a new mobile app even if no one showed me how to do it first.', 'likert_7', '{"min":1,"max":7}', false, 'self_efficacy', 27),
     (v_t1, 'se_3', 'I am confident I can use a new mobile app''s features even if I have never used a similar app before.', 'likert_7', '{"min":1,"max":7}', false, 'self_efficacy', 28),
@@ -155,7 +155,7 @@ END $$;
 --     ease-affirming statements ("was easy for me", "I find it easy",
 --     "clear and understandable", "easy to use").
 -- No changes to reverse_coded values in 051 are warranted. (By contrast,
--- three of the new subscales added above by this migration —
+-- four of the new subscales added above by this migration —
 -- control_complexity, control_capability, expected_utility, self_efficacy —
 -- DO each include one intentionally reverse-worded item, flagged
 -- reverse_coded = true, per the task's request for at least one

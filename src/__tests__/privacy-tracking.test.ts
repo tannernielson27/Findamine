@@ -109,9 +109,10 @@ describe("countOptionsShown (B4 objective option count)", () => {
 });
 
 describe("countOptionsShown with the per-person layer (migration 057)", () => {
-  it("adds 3 options per person listed under complex only", () => {
+  it("adds every field × 3 choices per person listed, under complex only", () => {
     expect(countOptionsShown("complex", 0)).toBe(32);
-    expect(countOptionsShown("complex", 5)).toBe(32 + 3 * 5);
+    expect(countOptionsShown("complex", 1)).toBe(32 + PROFILE_FIELDS.length * 3);
+    expect(countOptionsShown("complex", 5)).toBe(32 + 24 * 5);
     expect(countOptionsShown("moderate", 5)).toBe(12);
     expect(countOptionsShown("simple", 5)).toBe(4);
   });

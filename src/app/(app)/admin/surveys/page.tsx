@@ -73,7 +73,7 @@ export default function AdminSurveysPage() {
     const res = await fetch("/api/v1/surveys", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ title: newTitle.trim(), target_roles: ["teen", "parent", "teacher", "hunt_creator"] }),
+      body: JSON.stringify({ title: newTitle.trim(), target_roles: ["teen", "adult", "parent", "teacher", "hunt_creator"] }),
     });
     setCreating(false);
     if (res.ok) {

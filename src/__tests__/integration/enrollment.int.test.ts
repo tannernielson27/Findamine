@@ -84,6 +84,39 @@ describe("enrollParticipant against the Supabase double", () => {
     expect(Math.max(...counts) - Math.min(...counts)).toBeLessThanOrEqual(1);
   });
 
+  it("balances the six cells within each class section", async () => {
+    db.replace(
+      "roster_entries",
+      Array.from({ length: 24 }, (_, i) => ({
+        roster_id: i % 2 === 0 ? "section-a" : "section-b",
+        student_id: `u${i + 1}`,
+        added_at: "2026-09-01T00:00:00Z",
+      }))
+    );
+    for (let i = 1; i <= 24; i++) {
+      expect((await enrollParticipant(`u${i}`)).enrolled).toBe(true);
+    }
+    for (const section of ["section-a", "section-b"]) {
+      const members = new Set(
+        db.where("roster_entries", (e) => e.roster_id === section).map((e) => String(e.student_id))
+      );
+      const cells = new Map<string, number>();
+      const byUser = new Map<string, string[]>();
+      for (const a of db.table("dimension_assignments")) {
+        const u = String(a.user_id);
+        if (!members.has(u)) continue;
+        byUser.set(u, [...(byUser.get(u) || []), `${a.dimension_id}=${a.level}`]);
+      }
+      for (const levels of byUser.values()) {
+        const key = [...levels].sort().join("|");
+        cells.set(key, (cells.get(key) ?? 0) + 1);
+      }
+      // 12 members over 6 cells: exactly 2 each.
+      expect(cells.size).toBe(6);
+      expect(new Set(cells.values())).toEqual(new Set([2]));
+    }
+  });
+
   it("writes condition metadata, condition-aware defaults, a t0 snapshot, and the enrollment", async () => {
     await enrollParticipant("u1");
     const user = db.table("users").find((u) => u.id === "u1")!;

@@ -39,10 +39,10 @@ function seed(): SupabaseDouble {
       { study_id: STUDY, user_id: "u3", enrolled_at: t0, withdrawn_at: daysAgo(1) },
     ],
     users: [
-      // "teen" is a real users.role value; "student" is not one the CHECK allows.
-      { id: "u1", email: "zelda@example.edu", display_name: "Zelda", role: "teen", created_at: t0 },
-      { id: "u2", email: "bartholomew@example.edu", display_name: "Bartholomew", role: "teen", created_at: t0 },
-      { id: "u3", email: "cyrus@example.edu", display_name: "Cyrus", role: "teen", created_at: t0 },
+      // "adult" is the participant role (migration 065); "student" is not one the CHECK allows.
+      { id: "u1", email: "zelda@example.edu", display_name: "Zelda", role: "adult", created_at: t0 },
+      { id: "u2", email: "bartholomew@example.edu", display_name: "Bartholomew", role: "adult", created_at: t0 },
+      { id: "u3", email: "cyrus@example.edu", display_name: "Cyrus", role: "adult", created_at: t0 },
     ],
     // The age band lives here, not on users — the export reads effective_band.
     user_profiles: [
@@ -66,7 +66,11 @@ function seed(): SupabaseDouble {
     ],
     points_ledger: [
       { user_id: "u1", amount: 80, source_type: "challenge" },
-      { user_id: "u1", amount: 12, source_type: "referral" },
+      { user_id: "u1", amount: 12, source_type: "referral", created_at: daysAgo(7) },
+    ],
+    consent_records: [
+      { user_id: "u1", consent_type: "research", granted: true, revoked_at: null, form_version: "0.9", signed_at: daysAgo(20) },
+      { user_id: "u1", consent_type: "research", granted: true, revoked_at: null, form_version: "1.0", signed_at: t0 },
     ],
     minion_links: [{ recruiter_id: "u1", minion_id: "u2" }],
     privacy_index_snapshots: [
@@ -126,8 +130,10 @@ describe("research exports against the Supabase double", () => {
 
     const u1 = rows[0];
     // Demographics come from users + user_profiles.effective_band.
-    expect(u1.role).toBe("teen");
+    expect(u1.role).toBe("adult");
     expect(u1.age_band).toBe("adult");
+    expect(u1.consent_form_version).toBe("1.0"); // latest research grant
+    expect(rows[1].consent_form_version).toBe("");
     expect(u1.treatment_privacy_control_complexity).toBe("complex");
     expect(u1.treatment_privacy_default).toBe("public");
     expect(u1.total_hunts_completed).toBe("1");
@@ -172,6 +178,11 @@ describe("research exports against the Supabase double", () => {
     expect(first.treatment_privacy_control_complexity).toBe("complex");
     expect(first.treatment_privacy_default).toBe("public");
     expect(Number(first.days_since_enrollment)).toBeCloseTo(0, 1);
+
+    // Referral points accrue as a time-varying covariate (12 points at day 7).
+    const u1 = rows.filter((r) => r.participant_id === "P0001");
+    expect(u1.map((r) => r.cumulative_referral_points)).toEqual(["0", "0", "12"]);
+    expect(rows.find((r) => r.participant_id === "P0002")!.cumulative_referral_points).toBe("0");
   });
 
   it("events: excludes withdrawn participants and carries direction and deltas", async () => {

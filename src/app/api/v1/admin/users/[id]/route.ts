@@ -47,7 +47,7 @@ export async function PUT(
     const body = await request.json();
     const supabase = await createSupabaseServiceClient();
 
-    const validRoles = ["child", "teen", "parent", "teacher", "hunt_creator", "admin", "researcher"];
+    const validRoles = ["child", "teen", "adult", "parent", "teacher", "hunt_creator", "admin", "researcher"];
     const validStatuses = ["active", "inactive", "suspended", "banned", "pending_consent"];
 
     const updates: Record<string, unknown> = {};

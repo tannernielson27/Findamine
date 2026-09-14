@@ -66,8 +66,9 @@ export default async function DebriefPage() {
         <p>
           To study this fairly, different participants saw slightly different versions of the
           privacy experience. Each difference below was assigned at random and is the same kind of
-          variation real apps use. None of them changed what you were able to control — only how
-          the options were presented.
+          variation real apps use. Some changed only how the options were presented; others changed
+          which settings were available to you, such as how many separate controls you could
+          adjust, or how the game rewarded sharing.
         </p>
 
         {conditions.dimensions.length > 0 ? (

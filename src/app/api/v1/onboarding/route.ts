@@ -37,7 +37,7 @@ export async function GET(request: NextRequest) {
     // Determine next steps based on role
     const nextSteps: string[] = [];
     if (!milestoneSet.has("profile_completed")) nextSteps.push("Complete your profile");
-    if (!milestoneSet.has("first_hunt_started") && ["child", "teen", "parent"].includes(user.role)) {
+    if (!milestoneSet.has("first_hunt_started") && ["child", "teen", "adult", "parent"].includes(user.role)) {
       nextSteps.push("Join your first hunt");
     }
     if (!milestoneSet.has("first_hunt_started") && ["teacher", "hunt_creator"].includes(user.role)) {

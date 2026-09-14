@@ -40,6 +40,8 @@ export function humanizeDimensionName(name: string): string {
 export interface LinkedDimensionRow {
   dimension_id: string;
   sort_order?: number | null;
+  /** Per-study level subset (migration 052); null/empty means every level. */
+  active_levels?: string[] | null;
   treatment_dimensions:
     | { name: string; description: string | null; levels: string[] | null }
     | { name: string; description: string | null; levels: string[] | null }[]
@@ -67,12 +69,15 @@ export function buildConditionDimensions(
     .flatMap((row) => {
       const dim = unwrap(row.treatment_dimensions);
       if (!dim?.name) return [];
+      // Disclose only the versions this study actually ran.
+      const all = dim.levels ?? [];
+      const active = row.active_levels?.length ? all.filter((l) => row.active_levels!.includes(l)) : all;
       return [
         {
           name: dim.name,
           label: humanizeDimensionName(dim.name),
           description: dim.description ?? null,
-          levels: dim.levels ?? [],
+          levels: active,
           assigned_level: levelByDim.get(row.dimension_id) ?? null,
         },
       ];
@@ -96,7 +101,7 @@ export async function getParticipantConditions(userId: string): Promise<Particip
 
     const { data: linked } = await supabase
       .from("treatment_study_dimensions")
-      .select("dimension_id, sort_order, treatment_dimensions(name, description, levels)")
+      .select("dimension_id, sort_order, active_levels, treatment_dimensions(name, description, levels)")
       .eq("study_id", study.id);
     const linkedRows = (linked || []) as LinkedDimensionRow[];
 

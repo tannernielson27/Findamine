@@ -5,7 +5,7 @@
  * - Balanced allocation over the JOINT factorial cells (not per-dimension), so a
  *   3×3 design stays balanced across all 9 cells rather than only on each margin.
  * - Stratification: balance is computed within the participant's stratum
- *   (e.g. age band, school), so each stratum is independently balanced.
+ *   (class section, age band, school), so each stratum is independently balanced.
  * - Minimization / least-filled-cell allocation with a random tie-break. This
  *   keeps the maximum imbalance between cells within a stratum to ≤ 1 at all
  *   times — the same balance guarantee a permuted block gives, without having to
@@ -19,10 +19,13 @@
 import { createSupabaseServiceClient } from "@/lib/supabase/server";
 import { fetchAllByIds, fetchAllRows } from "@/lib/utils/paginate";
 
+/** Participant variables allocation can be balanced within. `class_id` is the first-joined roster. */
+export type StratumVariable = "age_band" | "school_id" | "class_id";
+
 export interface RandomizationConfig {
   studyId: string;
   dimensionIds: string[];
-  stratifyBy?: ("age_band" | "school_id")[];
+  stratifyBy?: StratumVariable[];
   /**
    * Per-study level subset per dimension id (treatment_study_dimensions.active_levels).
    * When omitted, assignParticipant loads it from the study's link rows itself.
@@ -83,14 +86,53 @@ export function resolveLevels(
 
 /** Build a stratum key from a user's variables and the configured strata. Pure. */
 export function stratumKeyFor(
-  stratifyBy: ("age_band" | "school_id")[] | undefined,
+  stratifyBy: StratumVariable[] | undefined,
   band: string | null | undefined,
-  schoolId: string | null | undefined
+  schoolId: string | null | undefined,
+  classId?: string | null
 ): string {
   const parts: string[] = [];
   if (stratifyBy?.includes("age_band")) parts.push(`band:${band || "unknown"}`);
   if (stratifyBy?.includes("school_id")) parts.push(`school:${schoolId || "none"}`);
+  if (stratifyBy?.includes("class_id")) parts.push(`class:${classId || "none"}`);
   return parts.join("|") || "all";
+}
+
+/**
+ * Each student's class for stratification: the roster they joined first
+ * (earliest added_at, then roster_id), so a later second class never moves a
+ * participant between strata. Pure.
+ */
+export function classByStudent(
+  entries: readonly { student_id: string; roster_id: string; added_at?: string | null }[]
+): Map<string, string> {
+  const sorted = [...entries].sort(
+    (a, b) =>
+      String(a.added_at ?? "").localeCompare(String(b.added_at ?? "")) ||
+      a.roster_id.localeCompare(b.roster_id)
+  );
+  const out = new Map<string, string>();
+  for (const e of sorted) if (!out.has(e.student_id)) out.set(e.student_id, e.roster_id);
+  return out;
+}
+
+/** First-joined class per student, for the students given. */
+async function loadClassByStudent(
+  supabase: Awaited<ReturnType<typeof createSupabaseServiceClient>>,
+  studentIds: string[]
+): Promise<Map<string, string>> {
+  if (studentIds.length === 0) return new Map();
+  const rows = await fetchAllByIds<{ student_id: string; roster_id: string; added_at: string | null }>(
+    studentIds,
+    (ids, from, to) =>
+      supabase
+        .from("roster_entries")
+        .select("student_id, roster_id, added_at")
+        .in("student_id", ids)
+        .order("student_id", { ascending: true })
+        .range(from, to)
+  );
+  return classByStudent(rows);
 }
 
 /** Stable key for one joint cell. */
@@ -185,10 +227,13 @@ export async function assignParticipant(
     .select("school_id")
     .eq("id", userId)
     .single();
+  const byClass = config.stratifyBy?.includes("class_id") ?? false;
+  const myClass = byClass ? await loadClassByStudent(supabase, [userId]) : new Map<string, string>();
   const myStratum = stratumKeyFor(
     config.stratifyBy,
     userProfile?.effective_band,
-    user?.school_id
+    user?.school_id,
+    myClass.get(userId)
   );
 
   // Enumerate the joint cells (one level per dimension, in dims order).
@@ -243,13 +288,17 @@ export async function assignParticipant(
     }
     const rowByUser = new Map<string, { school_id: string | null }>();
     for (const r of urows) rowByUser.set(r.id, { school_id: r.school_id });
+    const classByUser = byClass
+      ? await loadClassByStudent(supabase, assignedUserIds)
+      : new Map<string, string>();
 
     for (const uid of assignedUserIds) {
       const row = rowByUser.get(uid);
       const stratum = stratumKeyFor(
         config.stratifyBy,
         bandByUser.get(uid),
-        row?.school_id
+        row?.school_id,
+        classByUser.get(uid)
       );
       if (stratum !== myStratum) continue;
       const levels = dims.map((d) => byUser.get(uid)!.get(d.id)!);

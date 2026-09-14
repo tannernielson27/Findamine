@@ -206,7 +206,10 @@ export async function enrollParticipant(userId: string): Promise<EnrollmentResul
       activeLevels: Object.fromEntries(
         studyDims.map((d) => [d.dimension_id, (d.active_levels as string[] | null) ?? null])
       ),
-      stratifyBy: ["age_band"],
+      // Balanced within class section (design §6). Participants are one adult
+      // band, so age band would not stratify anything. Anyone who consents
+      // before joining a class is balanced within a "class:none" pool.
+      stratifyBy: ["class_id"],
       blockSize: 6,
     });
 
@@ -298,7 +301,7 @@ export async function enrollParticipant(userId: string): Promise<EnrollmentResul
       .update({ current_sample_size: count || 0 })
       .eq("id", study.id);
 
-    // 9. Materialize any immediately-due surveys (e.g. T1 baseline at offset 0).
+    // 9. Materialize any time-scheduled surveys already due (T1 is event-triggered).
     stage = "schedule_surveys";
     await createDueDeliveriesForUser(userId, new Date().toISOString());
 

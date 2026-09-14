@@ -59,6 +59,21 @@ export function countReversals(changeDeltas: ExportFieldDelta[][]): number {
   return reversals;
 }
 
+/**
+ * Referral points a participant had accrued by `at` (inclusive). Order of
+ * `ledger` does not matter. Pure + testable.
+ */
+export function referralPointsAt(
+  ledger: readonly { amount: number | null; created_at: string }[],
+  at: string
+): number {
+  const cutoff = new Date(at).getTime();
+  return ledger.reduce(
+    (sum, r) => (new Date(r.created_at).getTime() <= cutoff ? sum + (r.amount || 0) : sum),
+    0
+  );
+}
+
 /** Anonymized, sequential participant id (never derived from PII). */
 export function participantId(index: number): string {
   return `P${String(index + 1).padStart(4, "0")}`;
@@ -175,6 +190,23 @@ export async function generateResearchExport(config: ExportConfig): Promise<stri
         .range(from, to)
   );
   const bandByUser = new Map(profiles.map((p) => [p.user_id, p.effective_band ?? ""]));
+
+  // Consent wording version in force (design §7), so priming can be compared if
+  // the wording changes between cohorts. Ascending, so the latest grant wins.
+  const consents = await fetchAllByIds<{ user_id: string; form_version: string | null; signed_at: string | null }>(
+    userIds,
+    (ids, from, to) =>
+      supabase
+        .from("consent_records")
+        .select("user_id, form_version, signed_at")
+        .in("user_id", ids)
+        .eq("consent_type", "research")
+        .eq("granted", true)
+        .is("revoked_at", null)
+        .order("signed_at", { ascending: true })
+        .range(from, to)
+  );
+  const consentVersionByUser = new Map(consents.map((c) => [c.user_id, c.form_version ?? ""]));
 
   // Treatment assignments.
   const assignments = await fetchAllByIds<{ user_id: string; level: string; treatment_dimensions: unknown }>(
@@ -488,6 +520,7 @@ export async function generateResearchExport(config: ExportConfig): Promise<stri
     "age_band",
     "role",
     "enrolled_at",
+    "consent_form_version",
     ...Array.from(dimensionNames).map(treatmentHeader),
     "total_hunts_completed",
     "total_finds_completed",
@@ -556,6 +589,7 @@ export async function generateResearchExport(config: ExportConfig): Promise<stri
       bandByUser.get(userId) || "",
       user?.role || "",
       enrollment?.enrolled_at || "",
+      consentVersionByUser.get(userId) || "",
       ...treatmentValues,
       num(huntsCompleted.get(userId) || 0),
       num(findsCompleted.get(userId) || 0),
@@ -639,6 +673,24 @@ export async function generateTrajectoryExport(config: ExportConfig): Promise<st
   // from the row's own `conditions` map (legacy columns as fallback).
   const dimensionNames = await loadStudyDimensionNames(supabase, config.studyId);
 
+  // Referral ledger rows, for the time-varying referral covariate (E4).
+  const referralRows = await fetchAllByIds<{ user_id: string; amount: number | null; created_at: string }>(
+    userIds,
+    (ids, from, to) =>
+      supabase
+        .from("points_ledger")
+        .select("user_id, amount, created_at")
+        .in("user_id", ids)
+        .eq("source_type", "referral")
+        .order("created_at", { ascending: true })
+        .range(from, to)
+  );
+  const referralsByUser = new Map<string, { amount: number | null; created_at: string }[]>();
+  for (const r of referralRows) {
+    if (!referralsByUser.has(r.user_id)) referralsByUser.set(r.user_id, []);
+    referralsByUser.get(r.user_id)!.push(r);
+  }
+
   const headers = [
     "participant_id",
     "snapshot_at",
@@ -646,6 +698,7 @@ export async function generateTrajectoryExport(config: ExportConfig): Promise<st
     "index_value",
     "source",
     "unset",
+    "cumulative_referral_points",
     ...dimensionNames.map(treatmentHeader),
   ];
 
@@ -666,6 +719,7 @@ export async function generateTrajectoryExport(config: ExportConfig): Promise<st
       Number(s.index_value).toFixed(4),
       s.source ?? "",
       s.unset ? "true" : "false",
+      String(referralPointsAt(referralsByUser.get(s.user_id) || [], s.created_at)),
       ...conditionValues(dimensionNames, s.conditions as Record<string, unknown> | null, s),
     ]);
   }

@@ -509,12 +509,12 @@ export default function PrivacySettingsPage() {
         </p>
       )}
 
-      {/* Educational intro */}
+      {/* Intro — deliberately neutral: identical in every arm and free of
+          privacy-protective framing, so it neither primes concern nor
+          competes with the default and complexity manipulations. */}
       <div className="rounded-lg bg-sky-50 border border-sky-200 p-3 mb-4">
         <p className="text-xs text-sky-800">
-          <strong>Why privacy matters:</strong> Your personal information belongs to you.
-          These settings let you decide who sees what. There are no wrong answers — just
-          think about what you&apos;re comfortable sharing with different groups of people.
+          These settings control who can see each part of your profile.
         </p>
       </div>
 
