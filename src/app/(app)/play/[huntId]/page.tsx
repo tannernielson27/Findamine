@@ -7,6 +7,13 @@ import HotColdMeter from "@/components/play/hot-cold-meter";
 import ChallengeInput from "@/components/play/challenge-input";
 import NavigateMap from "@/components/maps/navigate-map";
 import { Celebration } from "@/components/ui/celebration";
+import { PrivacyNoticeToast } from "@/components/play/privacy-notice-toast";
+import type { PrivacyNotice } from "@/lib/services/privacy-notice";
+import {
+  celebrationForResult,
+  arrivalCelebration,
+  type CelebrationIntensity,
+} from "@/lib/play/celebration";
 
 type StopStep = "prime" | "reading_check" | "clue" | "navigate" | "challenge" | "capture" | "feedback";
 
@@ -77,6 +84,9 @@ export default function PlayPage() {
   const [readingCheckPassed, setReadingCheckPassed] = useState(false);
   const [showTechniqueReview, setShowTechniqueReview] = useState(false);
   const [techniqueReviewDone, setTechniqueReviewDone] = useState(false);
+  const [reviewStrategies, setReviewStrategies] = useState<string[]>([]);
+  const [showReport, setShowReport] = useState(false);
+  const [reportDone, setReportDone] = useState(false);
   const [clueHintText, setClueHintText] = useState("");
   const [clueHintLevel, setClueHintLevel] = useState(0);
   const [clueHintTotal, setClueHintTotal] = useState(0);
@@ -87,6 +97,13 @@ export default function PlayPage() {
   const [userPos, setUserPos] = useState<{ lat: number; lng: number } | null>(null);
   const [showCelebration, setShowCelebration] = useState(false);
   const [celebrationMessage, setCelebrationMessage] = useState("");
+  const [celebrationSub, setCelebrationSub] = useState<string | undefined>(undefined);
+  const [celebrationIntensity, setCelebrationIntensity] = useState<CelebrationIntensity>("medium");
+  const [sessionScore, setSessionScore] = useState(0);
+  // Just-in-time privacy notice after a completed find (storyline S6).
+  const [privacyNotice, setPrivacyNotice] = useState<PrivacyNotice | null>(null);
+  const closePrivacyNotice = useCallback(() => setPrivacyNotice(null), []);
+  const [arrivedCelebrated, setArrivedCelebrated] = useState(false);
   const [huntComplete, setHuntComplete] = useState(false);
   const [huntSummary, setHuntSummary] = useState<{
     totalScore: number;
@@ -113,6 +130,14 @@ export default function PlayPage() {
         const startData = await startRes.json();
         setFinds(findsData.finds || []);
 
+        // Mark the onboarding "first hunt" milestone (fire-and-forget). Drives
+        // the next-steps funnel surfaced after onboarding; never blocks play.
+        fetch("/api/v1/onboarding", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ milestone_type: "first_hunt_started" }),
+        }).catch(() => {});
+
         // Fetch hunt metadata for anxiety-sensitive mode and scoring config
         try {
           const huntRes = await safeFetch(`/api/v1/hunts/${huntId}`);
@@ -127,12 +152,21 @@ export default function PlayPage() {
         const progressRes = await safeFetch(`/api/v1/play/${huntId}/progress`);
         const progressData = await progressRes.json();
 
+        const doneCompletions = (progressData.completions || []).filter(
+          (c: { completed_at: string | null }) => c.completed_at
+        );
         const completed = new Set<string>(
-          (progressData.completions || [])
-            .filter((c: { completed_at: string | null }) => c.completed_at)
-            .map((c: { find_id: string }) => c.find_id)
+          doneCompletions.map((c: { find_id: string }) => c.find_id)
         );
         setCompletedFinds(completed);
+
+        // Seed the running-score chip from work already done this session.
+        const priorScore = (progressData.session?.total_score as number | undefined) ??
+          doneCompletions.reduce(
+            (sum: number, c: { score?: number }) => sum + (c.score || 0),
+            0
+          );
+        setSessionScore(priorScore);
 
         // Jump to first incomplete
         const allFinds = findsData.finds || [];
@@ -170,6 +204,7 @@ export default function PlayPage() {
     setCanRetry(false);
     setHotCold(null);
     setArrived(false);
+    setArrivedCelebrated(false);
     setHintText("");
     setHintLevel(0);
     setClueHintText("");
@@ -177,6 +212,11 @@ export default function PlayPage() {
     setClueHintTotal(0);
     setGpsStatus("waiting");
     setError(null);
+    setShowTechniqueReview(false);
+    setTechniqueReviewDone(false);
+    setReviewStrategies([]);
+    setShowReport(false);
+    setReportDone(false);
   }, [currentIndex, currentFind, completedFinds]);
 
   // ── GPS watcher for navigate step ──────────────────
@@ -210,6 +250,15 @@ export default function PlayPage() {
           if (data.hot_cold) setHotCold(data.hot_cold);
           if (data.arrived) {
             setArrived(true);
+            // The "you found it!" beat — the most satisfying moment in a hunt.
+            if (!arrivedCelebrated) {
+              const beat = arrivalCelebration();
+              setCelebrationMessage(beat.headline);
+              setCelebrationSub(undefined);
+              setCelebrationIntensity(beat.intensity);
+              setShowCelebration(true);
+              setArrivedCelebrated(true);
+            }
             setStep("challenge");
           }
         } catch {
@@ -335,12 +384,25 @@ export default function PlayPage() {
 
       if (data.is_complete) {
         setCompletedFinds((prev) => new Set([...prev, currentFind.id]));
-        setCelebrationMessage(
-          data.feedback?.type === "correct"
-            ? "Great job! You got it!"
-            : "Nice effort! Moving on."
+        // Surface the payoff immediately — points land in the celebration, not
+        // buried behind the optional photo step.
+        const celeb = celebrationForResult(
+          {
+            feedbackType: data.feedback?.type,
+            score: data.score,
+            attempt: data.attempt,
+            breakdown: data.breakdown,
+          },
+          !!huntMeta.hide_scores
         );
+        setCelebrationMessage(celeb.headline);
+        setCelebrationSub(celeb.points != null ? `+${celeb.points} points` : undefined);
+        setCelebrationIntensity(celeb.intensity);
         setShowCelebration(true);
+        if (typeof data.score === "number" && !huntMeta.hide_scores) {
+          setSessionScore((s) => s + data.score);
+        }
+        if (data.privacy_notice?.id) setPrivacyNotice(data.privacy_notice as PrivacyNotice);
         setStep("capture");
       }
     } catch (err) {
@@ -348,7 +410,7 @@ export default function PlayPage() {
     } finally {
       submittingRef.current = false;
     }
-  }, [currentFind, huntId, answer]);
+  }, [currentFind, huntId, answer, huntMeta.hide_scores]);
 
   const handleCaptureSkip = useCallback(() => {
     setStep("feedback");
@@ -378,11 +440,14 @@ export default function PlayPage() {
       });
       setHuntComplete(true);
       setCelebrationMessage("Hunt Complete!");
+      const finalScore = progress.session?.total_score || 0;
+      setCelebrationSub(!huntMeta.hide_scores && finalScore ? `${finalScore} points total` : undefined);
+      setCelebrationIntensity("high");
       setShowCelebration(true);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to complete hunt");
     }
-  }, [huntId, completedFinds.size, finds.length]);
+  }, [huntId, completedFinds.size, finds.length, huntMeta.hide_scores]);
 
   // ── Loading / Error states ─────────────────────────
 
@@ -422,6 +487,8 @@ export default function PlayPage() {
         <Celebration
           show={showCelebration}
           message={celebrationMessage}
+          subMessage={celebrationSub}
+          intensity={celebrationIntensity}
           onComplete={() => setShowCelebration(false)}
         />
 
@@ -480,8 +547,18 @@ export default function PlayPage() {
       <Celebration
         show={showCelebration}
         message={celebrationMessage}
+        subMessage={celebrationSub}
+        intensity={celebrationIntensity}
         onComplete={() => setShowCelebration(false)}
       />
+
+      {privacyNotice && (
+        <PrivacyNoticeToast
+          key={privacyNotice.id}
+          notice={privacyNotice}
+          onClose={closePrivacyNotice}
+        />
+      )}
 
       {/* Error banner */}
       {error && (
@@ -494,13 +571,24 @@ export default function PlayPage() {
       )}
 
       {/* Progress bar */}
-      <div className="flex justify-between text-sm mb-1.5">
+      <div className="flex justify-between items-center text-sm mb-1.5">
         <span className="font-[family-name:var(--font-display)] font-semibold text-gray-800">
           Stop {currentIndex + 1} of {finds.length}
         </span>
-        <span className="font-[family-name:var(--font-handwritten)] text-lg text-brand">
-          {totalCompleted}/{finds.length} done
-        </span>
+        <div className="flex items-center gap-3">
+          {!huntMeta.hide_scores && (
+            <span
+              className="inline-flex items-center gap-1 rounded-full bg-brand-light/60 px-2.5 py-0.5 font-[family-name:var(--font-display)] font-bold text-brand-dark tabular-nums"
+              aria-label={`${sessionScore} points so far`}
+            >
+              <span aria-hidden="true">⭐</span>
+              {sessionScore}
+            </span>
+          )}
+          <span className="font-[family-name:var(--font-handwritten)] text-lg text-brand">
+            {totalCompleted}/{finds.length} done
+          </span>
+        </div>
       </div>
       <div className="h-3 rounded-full bg-gray-100 mb-4 overflow-hidden shadow-inner" role="progressbar" aria-valuenow={totalCompleted} aria-valuemin={0} aria-valuemax={finds.length} aria-label={`Hunt progress: ${totalCompleted} of ${finds.length} stops completed`}>
         <div
@@ -763,8 +851,10 @@ export default function PlayPage() {
                 </p>
                 {!hintRated && (
                   <div className="flex items-center gap-2 mt-2">
-                    <span className="text-[11px] text-yellow-600">Was this helpful?</span>
+                    <span className="text-[11px] text-yellow-600" id="hint-helpful-label">Was this helpful?</span>
                     <button
+                      aria-label="Hint was helpful"
+                      aria-describedby="hint-helpful-label"
                       onClick={() => {
                         fetch("/api/v1/hints/rate", {
                           method: "POST",
@@ -773,11 +863,13 @@ export default function PlayPage() {
                         });
                         setHintRated(true);
                       }}
-                      className="text-xs px-2 py-0.5 rounded bg-green-100 text-green-700 hover:bg-green-200"
+                      className="text-xs px-2 py-1 rounded bg-green-100 text-green-700 hover:bg-green-200"
                     >
-                      👍
+                      <span aria-hidden="true">👍</span>
                     </button>
                     <button
+                      aria-label="Hint was not helpful"
+                      aria-describedby="hint-helpful-label"
                       onClick={() => {
                         fetch("/api/v1/hints/rate", {
                           method: "POST",
@@ -786,9 +878,9 @@ export default function PlayPage() {
                         });
                         setHintRated(true);
                       }}
-                      className="text-xs px-2 py-0.5 rounded bg-red-100 text-red-700 hover:bg-red-200"
+                      className="text-xs px-2 py-1 rounded bg-red-100 text-red-700 hover:bg-red-200"
                     >
-                      👎
+                      <span aria-hidden="true">👎</span>
                     </button>
                   </div>
                 )}
@@ -939,8 +1031,8 @@ export default function PlayPage() {
                   </button>
                 ) : (
                   <div className="rounded-lg bg-sky-50 border border-sky-200 p-3">
-                    <p className="text-xs font-medium text-sky-700 mb-2">What helped you?</p>
-                    <div className="flex flex-wrap gap-1.5 mb-2">
+                    <p className="text-xs font-medium text-sky-700 mb-2" id="review-strategies-label">What helped you?</p>
+                    <div className="flex flex-wrap gap-1.5 mb-2" role="group" aria-labelledby="review-strategies-label">
                       {[
                         { key: "read_carefully", label: "Read carefully" },
                         { key: "used_hint", label: "Used a hint" },
@@ -948,38 +1040,54 @@ export default function PlayPage() {
                         { key: "tried_and_learned", label: "Tried & learned" },
                         { key: "remembered", label: "Remembered from primer" },
                         { key: "guessed", label: "Guessed" },
-                      ].map((s) => (
-                        <button
-                          key={s.key}
-                          onClick={() => {
-                            const el = document.querySelector(`[data-strategy="${s.key}"]`);
-                            el?.classList.toggle("bg-sky-200");
-                            el?.classList.toggle("text-sky-800");
-                          }}
-                          data-strategy={s.key}
-                          className="rounded-full px-2.5 py-1 text-[11px] bg-gray-100 text-gray-600 transition"
-                        >
-                          {s.label}
-                        </button>
-                      ))}
+                      ].map((s) => {
+                        const selected = reviewStrategies.includes(s.key);
+                        return (
+                          <button
+                            key={s.key}
+                            type="button"
+                            aria-pressed={selected}
+                            onClick={() =>
+                              setReviewStrategies((prev) =>
+                                prev.includes(s.key) ? prev.filter((k) => k !== s.key) : [...prev, s.key]
+                              )
+                            }
+                            className={`rounded-full px-2.5 py-1 text-[11px] transition ${
+                              selected ? "bg-sky-200 text-sky-800" : "bg-gray-100 text-gray-600"
+                            }`}
+                          >
+                            {s.label}
+                          </button>
+                        );
+                      })}
                     </div>
-                    <p className="text-xs text-sky-700 mb-1">How confident are you?</p>
-                    <div className="flex gap-2 mb-2">
-                      {["😞", "😐", "😊"].map((emoji, i) => (
-                        <button key={i} className="text-lg hover:scale-110 transition" onClick={() => {
-                          fetch("/api/v1/technique-review", {
-                            method: "POST",
-                            headers: { "Content-Type": "application/json" },
-                            body: JSON.stringify({
-                              hunt_id: huntId,
-                              confidence: i + 1,
-                              strategies: Array.from(document.querySelectorAll("[data-strategy].bg-sky-200")).map(el => el.getAttribute("data-strategy")),
-                            }),
-                          });
-                          setTechniqueReviewDone(true);
-                          setShowTechniqueReview(false);
-                        }}>
-                          {emoji}
+                    <p className="text-xs text-sky-700 mb-1" id="review-confidence-label">How confident are you?</p>
+                    <div className="flex gap-2 mb-2" role="group" aria-labelledby="review-confidence-label">
+                      {[
+                        { emoji: "😞", label: "Not confident" },
+                        { emoji: "😐", label: "Somewhat confident" },
+                        { emoji: "😊", label: "Very confident" },
+                      ].map((c, i) => (
+                        <button
+                          key={i}
+                          type="button"
+                          aria-label={c.label}
+                          className="text-2xl leading-none p-1 rounded hover:scale-110 transition"
+                          onClick={() => {
+                            fetch("/api/v1/technique-review", {
+                              method: "POST",
+                              headers: { "Content-Type": "application/json" },
+                              body: JSON.stringify({
+                                hunt_id: huntId,
+                                confidence: i + 1,
+                                strategies: reviewStrategies,
+                              }),
+                            });
+                            setTechniqueReviewDone(true);
+                            setShowTechniqueReview(false);
+                          }}
+                        >
+                          <span aria-hidden="true">{c.emoji}</span>
                         </button>
                       ))}
                     </div>
@@ -1006,7 +1114,7 @@ export default function PlayPage() {
         <button
           onClick={() => setCurrentIndex(Math.max(0, currentIndex - 1))}
           disabled={currentIndex === 0}
-          className="rounded-md border border-gray-300 px-4 py-2 text-sm text-gray-700 hover:bg-gray-50 disabled:opacity-30"
+          className="rounded-lg border border-gray-300 px-4 py-2.5 text-sm text-gray-700 hover:bg-gray-50 disabled:opacity-30 min-h-[44px]"
         >
           Previous
         </button>
@@ -1015,14 +1123,14 @@ export default function PlayPage() {
           isLastFind ? (
             <button
               onClick={handleFinishHunt}
-              className="bg-brand text-white rounded-lg hover:bg-brand-dark transition-colors px-6 py-2 text-sm font-medium"
+              className="bg-brand text-white rounded-lg hover:bg-brand-dark transition-colors px-6 py-2.5 text-sm font-medium min-h-[44px]"
             >
               Finish Hunt
             </button>
           ) : (
             <button
               onClick={handleNextFind}
-              className="bg-brand text-white rounded-lg hover:bg-brand-dark transition-colors px-6 py-2 text-sm font-medium"
+              className="bg-brand text-white rounded-lg hover:bg-brand-dark transition-colors px-6 py-2.5 text-sm font-medium min-h-[44px]"
             >
               Next Stop
             </button>
@@ -1030,30 +1138,60 @@ export default function PlayPage() {
         )}
       </div>
 
-      {/* Report a problem */}
+      {/* Report a problem — accessible inline disclosure (no prompt/alert) */}
       <div className="mt-4 text-center">
-        <button
-          onClick={() => {
-            const category = prompt("What's the issue?\n1. Mean/hurtful\n2. Inappropriate\n3. Spam\n4. Off-topic\n5. Other");
-            const cats = ["mean_hurtful", "inappropriate", "spam", "off_topic", "other"];
-            const idx = parseInt(category || "0") - 1;
-            if (idx >= 0 && idx < cats.length) {
-              fetch("/api/v1/reports", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({
-                  category: cats[idx],
-                  target_type: "find",
-                  target_id: currentFind?.id || huntId,
-                }),
-              });
-              alert("Thanks for reporting. A teacher will review this.");
-            }
-          }}
-          className="text-[10px] text-gray-400 hover:text-gray-600"
-        >
-          Report a problem
-        </button>
+        {reportDone ? (
+          <p role="status" className="text-xs text-gray-500">Thanks for reporting. A teacher will review this.</p>
+        ) : !showReport ? (
+          <button
+            onClick={() => setShowReport(true)}
+            aria-expanded={false}
+            className="text-xs text-gray-400 hover:text-gray-600 underline"
+          >
+            Report a problem
+          </button>
+        ) : (
+          <div className="inline-block rounded-lg border border-gray-200 bg-white p-3 text-left">
+            <p className="text-xs font-medium text-gray-700 mb-2" id="report-label">What&apos;s the issue?</p>
+            <div className="flex flex-wrap gap-1.5" role="group" aria-labelledby="report-label">
+              {[
+                { key: "mean_hurtful", label: "Mean / hurtful" },
+                { key: "inappropriate", label: "Inappropriate" },
+                { key: "spam", label: "Spam" },
+                { key: "off_topic", label: "Off-topic" },
+                { key: "other", label: "Other" },
+              ].map((c) => (
+                <button
+                  key={c.key}
+                  type="button"
+                  onClick={() => {
+                    fetch("/api/v1/reports", {
+                      method: "POST",
+                      headers: { "Content-Type": "application/json" },
+                      body: JSON.stringify({
+                        category: c.key,
+                        target_type: "find",
+                        target_id: currentFind?.id || huntId,
+                      }),
+                    }).catch(() => {});
+                    setShowReport(false);
+                    setReportDone(true);
+                  }}
+                  className="rounded-full border border-gray-200 bg-gray-50 px-3 py-1.5 text-xs text-gray-700 hover:bg-gray-100 min-h-[36px]"
+                >
+                  {c.label}
+                </button>
+              ))}
+              <button
+                type="button"
+                onClick={() => setShowReport(false)}
+                className="rounded-full px-3 py-1.5 text-xs text-gray-400 hover:text-gray-600 min-h-[36px]"
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        )}
       </div>
     </main>
   );

@@ -1,8 +1,13 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { createSupabaseBrowserClient } from "@/lib/supabase/client";
 import { Trophy } from "lucide-react";
+import {
+  summarizeViewerStanding,
+  standingCaption,
+  type ServerMe,
+} from "@/lib/social/standing";
 
 interface LeaderboardEntry {
   user_id: string;
@@ -21,6 +26,9 @@ export default function Leaderboard({ huntId }: LeaderboardProps) {
   const [entries, setEntries] = useState<LeaderboardEntry[]>([]);
   const [loading, setLoading] = useState(true);
   const [identityMode, setIdentityMode] = useState("codename_assigned");
+  const [viewerId, setViewerId] = useState<string | null>(null);
+  const [serverMe, setServerMe] = useState<ServerMe | null>(null);
+  const refetchTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   async function fetchLeaderboard() {
     const params = huntId ? `?hunt_id=${huntId}` : "";
@@ -29,6 +37,8 @@ export default function Leaderboard({ huntId }: LeaderboardProps) {
       const data = await res.json();
       setEntries(data.entries || []);
       if (data.identity_mode) setIdentityMode(data.identity_mode);
+      setViewerId(data.viewer_id ?? null);
+      setServerMe(data.me ?? null);
     }
     setLoading(false);
   }
@@ -53,13 +63,23 @@ export default function Leaderboard({ huntId }: LeaderboardProps) {
         },
         (payload) => {
           if (payload.new.status === "completed" || payload.new.total_score !== payload.old?.total_score) {
-            fetchLeaderboard();
+            if (refetchTimer.current) clearTimeout(refetchTimer.current);
+            refetchTimer.current = setTimeout(() => {
+              refetchTimer.current = null;
+              fetchLeaderboard();
+            }, 3000);
           }
         }
       )
       .subscribe();
 
-    return () => { supabase.removeChannel(channel); };
+    return () => {
+      supabase.removeChannel(channel);
+      if (refetchTimer.current) {
+        clearTimeout(refetchTimer.current);
+        refetchTimer.current = null;
+      }
+    };
   }, [huntId]);
 
   const medals = ["🥇", "🥈", "🥉"];
@@ -68,6 +88,9 @@ export default function Leaderboard({ huntId }: LeaderboardProps) {
     "from-gray-50 to-slate-50 border-gray-200",
     "from-orange-50 to-amber-50 border-orange-200",
   ];
+
+  const { standing, pinned } = summarizeViewerStanding(entries, viewerId, serverMe);
+  const caption = standingCaption(standing);
 
   return (
     <div className="rounded-2xl border border-themed-border bg-white overflow-hidden">
@@ -100,46 +123,80 @@ export default function Leaderboard({ huntId }: LeaderboardProps) {
         </div>
       ) : (
         <div className="divide-y divide-gray-50">
-          {entries.map((entry, i) => (
-            <div
-              key={entry.user_id}
-              className={`flex items-center gap-3 px-5 py-3 transition-colors hover:bg-gray-50/50 ${
-                i < 3 ? `bg-gradient-to-r ${podiumColors[i]}` : ""
-              }`}
-            >
-              {/* Rank */}
+          {entries.map((entry, i) => {
+            const isViewer = viewerId != null && entry.user_id === viewerId;
+            return (
+              <div
+                key={entry.user_id}
+                className={`flex items-center gap-3 px-5 py-3 transition-colors ${
+                  isViewer
+                    ? "bg-brand-light/40 ring-1 ring-inset ring-brand/40"
+                    : i < 3
+                    ? `bg-gradient-to-r ${podiumColors[i]}`
+                    : "hover:bg-gray-50/50"
+                }`}
+              >
+                {/* Rank */}
+                <div className="w-8 text-center shrink-0">
+                  {i < 3 ? (
+                    <span className="text-xl">{medals[i]}</span>
+                  ) : (
+                    <span className="font-[family-name:var(--font-display)] text-sm font-bold text-gray-400">{i + 1}</span>
+                  )}
+                </div>
+
+                {/* Avatar */}
+                <div className="w-8 h-8 rounded-full bg-brand/10 flex items-center justify-center shrink-0">
+                  <span className="font-[family-name:var(--font-display)] text-xs font-bold text-brand">
+                    {(entry.display_name || "?")[0].toUpperCase()}
+                  </span>
+                </div>
+
+                {/* Name */}
+                <div className="flex-1 min-w-0">
+                  <p className="font-[family-name:var(--font-display)] text-sm font-semibold text-gray-900 truncate">
+                    {entry.display_name || "Anonymous"}
+                    {isViewer && (
+                      <span className="ml-2 rounded-full bg-brand px-1.5 py-0.5 text-[10px] font-bold text-white align-middle">You</span>
+                    )}
+                  </p>
+                  {isViewer && caption ? (
+                    <p className="text-xs font-medium text-brand-dark">{caption}</p>
+                  ) : entry.hunts_completed != null ? (
+                    <p className="text-xs text-gray-400">{entry.hunts_completed} hunts</p>
+                  ) : null}
+                </div>
+
+                {/* Score */}
+                <div className="text-right shrink-0">
+                  <span className="font-[family-name:var(--font-display)] text-base font-bold text-brand">{entry.score}</span>
+                  <span className="text-[10px] text-gray-400 ml-1">pts</span>
+                </div>
+              </div>
+            );
+          })}
+
+          {/* Viewer's standing pinned when they're off the visible board */}
+          {pinned && standing && (
+            <div className="flex items-center gap-3 border-t-2 border-dashed border-brand/30 bg-brand-light/40 px-5 py-3">
               <div className="w-8 text-center shrink-0">
-                {i < 3 ? (
-                  <span className="text-xl">{medals[i]}</span>
-                ) : (
-                  <span className="font-[family-name:var(--font-display)] text-sm font-bold text-gray-400">{i + 1}</span>
-                )}
+                <span className="font-[family-name:var(--font-display)] text-sm font-bold text-brand-dark">{standing.rank}</span>
               </div>
-
-              {/* Avatar */}
               <div className="w-8 h-8 rounded-full bg-brand/10 flex items-center justify-center shrink-0">
-                <span className="font-[family-name:var(--font-display)] text-xs font-bold text-brand">
-                  {(entry.display_name || "?")[0].toUpperCase()}
-                </span>
+                <span className="font-[family-name:var(--font-display)] text-xs font-bold text-brand">★</span>
               </div>
-
-              {/* Name */}
               <div className="flex-1 min-w-0">
-                <p className="font-[family-name:var(--font-display)] text-sm font-semibold text-gray-900 truncate">
-                  {entry.display_name || "Anonymous"}
+                <p className="font-[family-name:var(--font-display)] text-sm font-semibold text-gray-900">
+                  You
                 </p>
-                {entry.hunts_completed != null && (
-                  <p className="text-xs text-gray-400">{entry.hunts_completed} hunts</p>
-                )}
+                {caption && <p className="text-xs font-medium text-brand-dark">{caption}</p>}
               </div>
-
-              {/* Score */}
               <div className="text-right shrink-0">
-                <span className="font-[family-name:var(--font-display)] text-base font-bold text-brand">{entry.score}</span>
+                <span className="font-[family-name:var(--font-display)] text-base font-bold text-brand">{standing.score}</span>
                 <span className="text-[10px] text-gray-400 ml-1">pts</span>
               </div>
             </div>
-          ))}
+          )}
         </div>
       )}
     </div>

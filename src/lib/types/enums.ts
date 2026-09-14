@@ -1,6 +1,7 @@
 export type UserRole =
   | "child"
   | "teen"
+  | "adult"
   | "parent"
   | "teacher"
   | "hunt_creator"

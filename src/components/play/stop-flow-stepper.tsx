@@ -23,7 +23,7 @@ export default function StopFlowStepper({ currentStep }: StopFlowStepperProps) {
         const isCompleted = i < currentIndex;
 
         return (
-          <div key={step.key} className="flex flex-col items-center flex-1">
+          <div key={step.key} className="flex min-w-0 flex-col items-center flex-1">
             <div
               className={`flex items-center justify-center rounded-full text-lg transition-all`}
               style={{
@@ -49,7 +49,7 @@ export default function StopFlowStepper({ currentStep }: StopFlowStepperProps) {
               {isCompleted ? "✓" : step.icon}
             </div>
             <span
-              className="text-xs mt-1"
+              className="text-[11px] sm:text-xs mt-1 max-w-full truncate"
               style={{
                 color: isActive
                   ? "var(--color-primary-dark, #0284C7)"

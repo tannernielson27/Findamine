@@ -8,6 +8,7 @@
 
 import { createSupabaseServiceClient } from "@/lib/supabase/server";
 import { checkBalance } from "@/lib/services/randomization";
+import { ENROLLMENT_FAILED_EVENT } from "@/lib/services/enrollment";
 
 export interface StudyHealth {
   study: {
@@ -18,6 +19,11 @@ export interface StudyHealth {
     current_sample_size: number;
     target_sample_size: number | null;
   } | null;
+  /**
+   * research/study_enrollment_failed behavioral_events in the last 7 days (B7).
+   * Not study-scoped: a failure can happen before the study is even resolved.
+   */
+  enrollment_failures_7d: number;
   balance: Awaited<ReturnType<typeof checkBalance>>;
   logging: {
     participants: number;
@@ -30,6 +36,18 @@ export interface StudyHealth {
     minion_links: number;
     referral_points_total: number;
   };
+  /** Delivery→submission funnel per survey timepoint (T1/T2/T3). */
+  surveys: SurveyFunnelRow[];
+}
+
+export interface SurveyFunnelRow {
+  timepoint: string;
+  survey_title: string;
+  survey_status: string;
+  delivered: number;
+  opened: number;
+  submitted: number;
+  expired: number;
 }
 
 export async function getStudyHealth(studyId: string): Promise<StudyHealth> {
@@ -49,6 +67,15 @@ export async function getStudyHealth(studyId: string): Promise<StudyHealth> {
   const userIds = (enrollments || []).map((e) => e.user_id);
 
   const balance = await checkBalance(studyId);
+
+  // Enrollment failures surfaced by enrollParticipant()'s catch block (B7).
+  const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 3_600_000).toISOString();
+  const { count: enrollmentFailures7d } = await supabase
+    .from("behavioral_events")
+    .select("*", { count: "exact", head: true })
+    .eq("event_type", ENROLLMENT_FAILED_EVENT.eventType)
+    .eq("event_name", ENROLLMENT_FAILED_EVENT.eventName)
+    .gte("created_at", sevenDaysAgo);
 
   // Logging completeness.
   const usersWithEvents = new Set<string>();
@@ -94,8 +121,61 @@ export async function getStudyHealth(studyId: string): Promise<StudyHealth> {
     referralPointsTotal = (refPoints || []).reduce((s, r) => s + (r.amount || 0), 0);
   }
 
+  // Survey delivery/submission funnel per timepoint — one of the four pilot
+  // validation checks (prospectus §7c: survey timing/delivery).
+  const surveys: SurveyFunnelRow[] = [];
+  const { data: schedules } = await supabase
+    .from("survey_schedules")
+    .select("survey_id, trigger_config, surveys(title, status)")
+    .eq("trigger_type", "time");
+  const scheduleRows = (schedules || [])
+    .map((s) => {
+      const cfg = (s.trigger_config || {}) as { timepoint?: string; offset_days?: number };
+      const survey = s.surveys as unknown as { title: string; status: string } | null;
+      return {
+        surveyId: s.survey_id,
+        timepoint: cfg.timepoint || (cfg.offset_days !== undefined ? `d${cfg.offset_days}` : "?"),
+        title: survey?.title || "",
+        status: survey?.status || "",
+      };
+    })
+    .sort((a, b) => a.timepoint.localeCompare(b.timepoint));
+
+  if (scheduleRows.length > 0 && userIds.length > 0) {
+    const { data: deliveries } = await supabase
+      .from("survey_deliveries")
+      .select("survey_id, status")
+      .in("user_id", userIds)
+      .in("survey_id", scheduleRows.map((r) => r.surveyId));
+    for (const row of scheduleRows) {
+      const mine = (deliveries || []).filter((d) => d.survey_id === row.surveyId);
+      surveys.push({
+        timepoint: row.timepoint,
+        survey_title: row.title,
+        survey_status: row.status,
+        delivered: mine.length,
+        opened: mine.filter((d) => d.status === "opened" || d.status === "submitted").length,
+        submitted: mine.filter((d) => d.status === "submitted").length,
+        expired: mine.filter((d) => d.status === "expired").length,
+      });
+    }
+  } else {
+    for (const row of scheduleRows) {
+      surveys.push({
+        timepoint: row.timepoint,
+        survey_title: row.title,
+        survey_status: row.status,
+        delivered: 0,
+        opened: 0,
+        submitted: 0,
+        expired: 0,
+      });
+    }
+  }
+
   return {
     study: study || null,
+    enrollment_failures_7d: enrollmentFailures7d || 0,
     balance,
     logging: {
       participants: userIds.length,
@@ -108,6 +188,7 @@ export async function getStudyHealth(studyId: string): Promise<StudyHealth> {
       minion_links: minionLinks,
       referral_points_total: referralPointsTotal,
     },
+    surveys,
   };
 }
 

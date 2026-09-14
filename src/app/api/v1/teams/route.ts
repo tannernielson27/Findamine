@@ -2,6 +2,7 @@ import { NextRequest } from "next/server";
 import { createSupabaseServiceClient } from "@/lib/supabase/server";
 import { getAuthUser, errorResponse, ApiError } from "@/lib/utils/api-auth";
 import { filterProfileForViewer, type ViewerRelationship } from "@/lib/utils/privacy";
+import { getViewerRelationships } from "@/lib/utils/viewer";
 
 type EmbeddedUser = {
   id: string;
@@ -51,11 +52,22 @@ export async function GET(request: NextRequest) {
     if (huntId) {
       const { data } = await supabase
         .from("teams")
-        .select("*, team_members(user_id, role, users(id, display_name, avatar_url))")
+        .select("*, team_members(user_id, role, users(id, display_name, avatar_url, profile_visibility))")
         .eq("hunt_id", huntId)
         .order("created_at");
 
-      return Response.json({ teams: data || [] });
+      // Respect each member's display_name/avatar visibility for this viewer,
+      // just like the mine=true branch (previously this branch leaked both).
+      const memberIds = (data || []).flatMap(
+        (t: { team_members?: Array<{ user_id: string }> }) =>
+          (t.team_members || []).map((m) => m.user_id)
+      );
+      const rels = await getViewerRelationships(user.id, memberIds);
+      const relFor = (id: string): ViewerRelationship =>
+        id === user.id ? "self" : rels.get(id) ?? "public";
+      const teams = (data || []).map((t) => filterTeamMembers(t, relFor));
+
+      return Response.json({ teams });
     }
 
     throw new ApiError(400, "Provide hunt_id or mine=true");

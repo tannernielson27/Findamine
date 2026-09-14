@@ -7,7 +7,11 @@
 
 import { NextRequest } from "next/server";
 import { createSupabaseServiceClient } from "@/lib/supabase/server";
-import { createDueDeliveriesForUser, expireStaleDeliveries } from "@/lib/services/survey-delivery";
+import {
+  createDueDeliveriesForUser,
+  expireStaleDeliveries,
+  sendSurveyReminders,
+} from "@/lib/services/survey-delivery";
 
 export const maxDuration = 60;
 
@@ -38,10 +42,12 @@ export async function GET(request: NextRequest) {
   }
 
   const expired = await expireStaleDeliveries();
+  const reminders = await sendSurveyReminders();
 
   return Response.json({
     participants: (enrollments || []).length,
     deliveries_created: created,
     deliveries_expired: expired,
+    reminders_sent: reminders,
   });
 }
