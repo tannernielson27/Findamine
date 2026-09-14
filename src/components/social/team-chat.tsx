@@ -1,14 +1,21 @@
 "use client";
 
 import { useState, useEffect, useRef } from "react";
+import Link from "next/link";
 import { createSupabaseBrowserClient } from "@/lib/supabase/client";
+import { canViewField } from "@/lib/utils/privacy";
 
 interface ChatMessage {
   id: string;
   message: string;
   created_at: string;
   user_id: string;
-  users: { id: string; display_name: string | null; avatar_url: string | null } | null;
+  users: {
+    id: string;
+    display_name: string | null;
+    avatar_url: string | null;
+    profile_visibility?: Record<string, string>;
+  } | null;
 }
 
 interface TeamChatProps {
@@ -50,10 +57,10 @@ export default function TeamChat({ teamId, currentUserId }: TeamChatProps) {
           filter: `team_id=eq.${teamId}`,
         },
         async (payload) => {
-          // Fetch the full message with user join
+          // Fetch the full message with user join (visibility enforced at render)
           const { data } = await supabase
             .from("team_messages")
-            .select("*, users(id, display_name, avatar_url)")
+            .select("*, users(id, display_name, avatar_url, profile_visibility)")
             .eq("id", payload.new.id)
             .single();
           if (data) {
@@ -119,7 +126,18 @@ export default function TeamChat({ teamId, currentUserId }: TeamChatProps) {
                 }`}>
                   {!isMe && (
                     <p className="text-xs font-medium text-gray-500 mb-0.5">
-                      {msg.users?.display_name || "Player"}
+                      {/* Chat viewers are teammates — enforce the sender's display_name
+                          visibility (API-loaded messages arrive pre-filtered; this also
+                          covers realtime rows fetched directly from the client). */}
+                      {msg.users?.id &&
+                      msg.users.display_name &&
+                      canViewField(msg.users.profile_visibility, "team", "display_name") ? (
+                        <Link href={`/profile/${msg.users.id}`} className="hover:underline">
+                          {msg.users.display_name}
+                        </Link>
+                      ) : (
+                        "Explorer"
+                      )}
                     </p>
                   )}
                   <p className="text-sm">{msg.message}</p>

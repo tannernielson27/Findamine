@@ -2,6 +2,8 @@ import { NextRequest } from "next/server";
 import { createSupabaseServiceClient } from "@/lib/supabase/server";
 import { getAuthUser, errorResponse, ApiError } from "@/lib/utils/api-auth";
 import { calculateScore, getGrowthMindsetMessage } from "@/lib/services/scoring";
+import { awardReferralPoints } from "@/lib/services/referral";
+import { recordPrivacyNotice, type PrivacyNotice } from "@/lib/services/privacy-notice";
 import { logger } from "@/lib/utils/logger";
 import { playLimiter } from "@/lib/utils/rate-limit";
 
@@ -158,6 +160,7 @@ export async function POST(
     });
 
     // Award points if completed
+    let privacyNotice: PrivacyNotice | null = null;
     if (isNowComplete) {
       await supabase.from("points_ledger").insert({
         user_id: user.id,
@@ -183,6 +186,23 @@ export async function POST(
         .from("play_sessions")
         .update({ total_score: totalScore })
         .eq("id", session.id);
+
+      // Referral economy: a recruiter earns a share when their minion scores.
+      await awardReferralPoints(user.id, scoringResult.totalScore, find_id, huntId);
+
+      // Just-in-time privacy notice (storyline S6, migration 063). Skipped for
+      // hunts that hide scores: a notice about who can see "this score" would
+      // be about a score the player is never shown. recordPrivacyNotice never
+      // throws, so scoring cannot fail because of it.
+      const { data: hunt } = await supabase
+        .from("hunts")
+        .select("metadata")
+        .eq("id", huntId)
+        .maybeSingle();
+      const huntHidesScores = !!(hunt?.metadata as Record<string, unknown> | null)?.hide_scores;
+      if (!huntHidesScores) {
+        privacyNotice = await recordPrivacyNotice(user.id, { findId: find_id, huntId });
+      }
     }
 
     logger.info("play.answer", { userId: user.id, huntId, findId: find_id, score: scoringResult.totalScore, correct: isCorrect, attempt: attemptCount, durationMs: Math.round(performance.now() - start) });
@@ -199,6 +219,7 @@ export async function POST(
       attempt: attemptCount,
       can_retry: scoringResult.feedback.canRetry,
       is_complete: isNowComplete,
+      privacy_notice: privacyNotice,
     });
   } catch (error) {
     logger.error("play.answer.error", { durationMs: Math.round(performance.now() - start), error: error instanceof Error ? error.message : String(error) });

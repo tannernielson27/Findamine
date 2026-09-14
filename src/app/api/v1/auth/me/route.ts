@@ -13,7 +13,7 @@ export async function GET(request: NextRequest) {
     const supabase = await createSupabaseServiceClient();
     const { data: profile, error } = await supabase
       .from("users")
-      .select("id, email, display_name, avatar_url, role, status, age_band, created_at, metadata, profile_visibility")
+      .select("id, email, display_name, avatar_url, role, status, created_at, metadata, profile_visibility, profile_visibility_overrides")
       .eq("id", user.id)
       .is("deleted_at", null)
       .single();
@@ -22,7 +22,16 @@ export async function GET(request: NextRequest) {
       throw new ApiError(404, "User profile not found");
     }
 
-    return Response.json({ user: profile });
+    // age_band is a user_profiles column (effective_band). Selecting it from
+    // `users` failed this whole query in PostgREST, so /auth/me 404'd — which
+    // is the call the privacy page depends on for its condition and settings.
+    const { data: bandRow } = await supabase
+      .from("user_profiles")
+      .select("effective_band")
+      .eq("user_id", user.id)
+      .maybeSingle();
+
+    return Response.json({ user: { ...profile, age_band: bandRow?.effective_band ?? null } });
   } catch (error) {
     return errorResponse(error);
   }

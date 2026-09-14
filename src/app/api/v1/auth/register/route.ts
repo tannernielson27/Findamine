@@ -5,6 +5,9 @@ import { authLimiter } from "@/lib/utils/rate-limit";
 import { withLogging } from "@/lib/utils/with-logging";
 import { botGuard } from "@/lib/utils/bot-guard";
 import { trackEvent } from "@/lib/utils/track-event";
+import { enrollParticipant } from "@/lib/services/enrollment";
+import { redeemReferral } from "@/lib/services/referral";
+import { resolveSelfRegisterRole } from "@/lib/utils/registration";
 
 export const POST = withLogging("POST /api/v1/auth/register", async (request: NextRequest) => {
   const blocked = await botGuard(request);
@@ -32,28 +35,12 @@ export const POST = withLogging("POST /api/v1/auth/register", async (request: Ne
     }
   }
 
-  const selfRegisterRoles = ["teen", "parent", "teacher", "hunt_creator"];
-  let userRole = selfRegisterRoles.includes(role) ? role : "parent";
-
-  // If registering as teen, require DOB and verify age >= 13
-  if (userRole === "teen") {
-    if (!date_of_birth) {
-      throw new ApiError(400, "Date of birth is required for teen accounts");
-    }
-    const age = Math.floor(
-      (Date.now() - new Date(date_of_birth).getTime()) /
-        (365.25 * 24 * 60 * 60 * 1000)
-    );
-    if (age < 13) {
-      throw new ApiError(
-        403,
-        "You must be 13 or older to create your own account. Ask a parent or teacher to create an account for you."
-      );
-    }
-    if (age >= 18) {
-      userRole = "parent";
-    }
+  // Teens must be 13+, adults 18+ (an 18+ "teen" becomes an adult player).
+  const resolved = resolveSelfRegisterRole(role, date_of_birth);
+  if (!resolved.ok) {
+    throw new ApiError(resolved.status, resolved.message);
   }
+  const userRole = resolved.role;
 
   const supabase = await createSupabaseServiceClient();
 
@@ -86,6 +73,22 @@ export const POST = withLogging("POST /api/v1/auth/register", async (request: Ne
   if (userError) {
     await supabase.auth.admin.deleteUser(authData.user.id);
     throw new ApiError(500, "Failed to create user profile");
+  }
+
+  // Adult players get the adult age band (themes, privacy defaults, export).
+  if (userRole === "adult") {
+    await supabase
+      .from("user_profiles")
+      .upsert({ user_id: user.id, age_band: "adult" }, { onConflict: "user_id" });
+  }
+
+  // Assign treatment + enroll at signup (idempotent; never throws). The (app)
+  // layout re-runs this on first authenticated load as a safety net.
+  await enrollParticipant(user.id);
+
+  // Optional: if the user arrived via a referral link, link them to the recruiter.
+  if (body.referral_code && typeof body.referral_code === "string") {
+    await redeemReferral(user.id, body.referral_code);
   }
 
   return Response.json(

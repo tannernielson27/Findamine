@@ -1,6 +1,15 @@
 import { NextRequest } from "next/server";
 import { createSupabaseServiceClient } from "@/lib/supabase/server";
 import { getAuthUser, blockChildren, errorResponse, ApiError } from "@/lib/utils/api-auth";
+import { filterProfileForViewer } from "@/lib/utils/privacy";
+import { getViewerRelationships } from "@/lib/utils/viewer";
+
+type EmbeddedUser = {
+  id: string;
+  display_name: string | null;
+  avatar_url: string | null;
+  profile_visibility?: Record<string, string>;
+};
 
 export async function GET(request: NextRequest) {
   try {
@@ -15,12 +24,33 @@ export async function GET(request: NextRequest) {
     const column = type === "sent" ? "sender_id" : "receiver_id";
     const { data } = await supabase
       .from("kudos")
-      .select("*, sender:users!sender_id(id, display_name, avatar_url), receiver:users!receiver_id(id, display_name, avatar_url)")
+      .select("*, sender:users!sender_id(id, display_name, avatar_url, profile_visibility), receiver:users!receiver_id(id, display_name, avatar_url, profile_visibility)")
       .eq(column, user.id)
       .order("created_at", { ascending: false })
       .limit(50);
 
-    return Response.json({ kudos: data || [] });
+    const rows = data || [];
+
+    // Enforce profile-field visibility on embedded counterpart users.
+    const otherIds = rows.flatMap((r) => {
+      const other = (r.sender_id === user.id ? r.receiver : r.sender) as EmbeddedUser | null;
+      return other?.id ? [other.id] : [];
+    });
+    const rels = await getViewerRelationships(user.id, otherIds);
+
+    const applyFilter = (u: EmbeddedUser | null) => {
+      if (!u?.id) return u;
+      const rel = u.id === user.id ? "self" : rels.get(u.id) ?? "public";
+      return { id: u.id, ...filterProfileForViewer(u, rel) };
+    };
+
+    const kudos = rows.map((r) => ({
+      ...r,
+      sender: applyFilter(r.sender as EmbeddedUser | null),
+      receiver: applyFilter(r.receiver as EmbeddedUser | null),
+    }));
+
+    return Response.json({ kudos });
   } catch (error) {
     return errorResponse(error);
   }
